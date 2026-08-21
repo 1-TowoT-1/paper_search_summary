@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     auto_create_tables: bool = True
     cors_origins: list[str] = Field(default_factory=lambda: ["*"])
 
-    database_url: str = "postgresql+psycopg://litsage:***@localhost:5432/litsage"
+    database_url: str = "postgresql+psycopg://litsage:12345678@localhost:5432/litsage"
     redis_url: str = "redis://localhost:6379/0"
     celery_broker_url: str = "redis://localhost:6379/1"
     celery_result_backend: str = "redis://localhost:6379/2"
