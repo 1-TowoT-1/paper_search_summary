@@ -82,6 +82,7 @@ class ImportPapersResponse(BaseModel):
     task_id: UUID
     status: str
     message: str
+    stats: dict[str, int | list[str]] | None = None
 
 
 class SummaryResponse(BaseModel):

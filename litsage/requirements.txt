@@ -10,5 +10,8 @@ python-jose[cryptography]==3.5.0
 email-validator==2.2.0
 httpx==0.28.1
 pymupdf==1.26.3
+streamlit==1.48.1
+requests==2.32.4
+pymilvus==2.5.14
 pytest==8.4.1
 pytest-asyncio==1.1.0

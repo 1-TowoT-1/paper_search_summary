@@ -12,7 +12,7 @@ from app.services.summary_service import SummaryService
 router = APIRouter()
 
 
-@router.post("/import", response_model=ImportPapersResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post("/import", response_model=ImportPapersResponse, status_code=status.HTTP_200_OK)
 async def import_papers(
     payload: ImportPapersRequest,
     user_id: str = Depends(get_current_user_id),
@@ -34,4 +34,3 @@ async def get_paper_summary(
     _: str = Depends(get_current_user_id),
 ) -> SummaryResponse:
     return await SummaryService().summarize_paper(paper_id=paper_id)
-
