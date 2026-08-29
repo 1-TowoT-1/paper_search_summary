@@ -30,6 +30,30 @@ class AuthToken(BaseModel):
     token_type: str
 
 
+class PasswordChangeRequest(BaseModel):
+    old_password: str = Field(min_length=8, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class EmailVerificationRequest(BaseModel):
+    email: EmailStr
+
+
+class EmailVerificationResponse(BaseModel):
+    email: EmailStr
+    message: str
+    dev_code: str | None = None
+
+
+class EmailChangeRequest(BaseModel):
+    new_email: EmailStr
+    verification_code: str = Field(min_length=4, max_length=12)
+
+
+class MessageResponse(BaseModel):
+    message: str
+
+
 class PaperRead(BaseModel):
     id: UUID
     title: str
@@ -44,6 +68,22 @@ class PaperRead(BaseModel):
     metadata_json: dict = {}
 
     model_config = {"from_attributes": True}
+
+
+class PaperDeleteResponse(BaseModel):
+    paper_id: UUID
+    deleted: bool
+    project_links_deleted: int = 0
+    vector_deleted: bool
+    vector_delete_stats: dict[str, int | str] | None = None
+    vector_delete_error: str | None = None
+
+
+class PaperListResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    results: list[PaperRead]
 
 
 class SearchResult(BaseModel):
@@ -75,6 +115,31 @@ class ImportPapersRequest(BaseModel):
     query: str = Field(min_length=2)
     sources: list[LiteratureSource] = Field(default_factory=lambda: [LiteratureSource.arxiv])
     limit: int = Field(default=20, ge=1, le=100)
+    include_pdf: bool = False
+
+
+class ImportCandidatePaper(BaseModel):
+    title: str
+    authors: list[dict] = []
+    abstract: str
+    doi: str | None = None
+    source: str
+    source_id: str
+    published_date: date | None = None
+    pdf_url: str | None = None
+    citation_count: int = 0
+    metadata: dict = {}
+
+
+class ImportPreviewResponse(BaseModel):
+    query: str
+    total: int
+    candidates: list[ImportCandidatePaper]
+    stats: dict[str, int | list[str]]
+
+
+class ImportSelectedPapersRequest(BaseModel):
+    papers: list[ImportCandidatePaper] = Field(min_length=1, max_length=100)
     include_pdf: bool = False
 
 

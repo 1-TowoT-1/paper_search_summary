@@ -14,7 +14,14 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import settings
 from app.models.db import Paper, SessionLocal
-from app.models.schemas import ImportPapersRequest, ImportPapersResponse, LiteratureSource
+from app.models.schemas import (
+    ImportCandidatePaper,
+    ImportPapersRequest,
+    ImportPapersResponse,
+    ImportPreviewResponse,
+    ImportSelectedPapersRequest,
+    LiteratureSource,
+)
 from app.services.embedding_service import EmbeddingError, EmbeddingService
 from app.services.vector_store import VectorStore, VectorStoreError
 
@@ -36,15 +43,25 @@ class ImportedPaper:
     metadata: dict
 
 
+@dataclass
+class PDFProcessResult:
+    success: bool
+    chunk_count: int = 0
+    error: str | None = None
+
+
 class ImportStats:
     def __init__(self) -> None:
         self.values: dict[str, int | list[str]] = {
             "fetched": 0,
             "created": 0,
             "updated": 0,
+            "skipped_duplicate": 0,
             "skipped_no_abstract": 0,
             "skipped_embedding_failed": 0,
             "abstract_vectorized": 0,
+            "pdf_retried": 0,
+            "pdf_already_processed": 0,
             "pdf_processed": 0,
             "pdf_skipped": 0,
             "failed": 0,
@@ -84,6 +101,36 @@ class PaperImporter:
         papers = await self.fetch_from_sources(payload=payload, stats=stats)
         await self.import_papers(papers=papers, include_pdf=payload.include_pdf, stats=stats)
 
+        return ImportPapersResponse(
+            task_id=task_id,
+            status="completed",
+            message=self._build_message(stats),
+            stats=stats.values,
+        )
+
+    async def preview_import(self, payload: ImportPapersRequest, user_id: str) -> ImportPreviewResponse:
+        _ = user_id
+        stats = ImportStats()
+        papers = await self.fetch_from_sources(payload=payload, stats=stats)
+        candidates = [self._to_candidate(paper) for paper in papers]
+        return ImportPreviewResponse(
+            query=payload.query,
+            total=len(candidates),
+            candidates=candidates,
+            stats=stats.values,
+        )
+
+    async def import_selected(
+        self,
+        payload: ImportSelectedPapersRequest,
+        user_id: str,
+    ) -> ImportPapersResponse:
+        _ = user_id
+        task_id = uuid4()
+        stats = ImportStats()
+        papers = [self._from_candidate(candidate) for candidate in payload.papers]
+        stats.inc("fetched", len(papers))
+        await self.import_papers(papers=papers, include_pdf=payload.include_pdf, stats=stats)
         return ImportPapersResponse(
             task_id=task_id,
             status="completed",
@@ -155,14 +202,25 @@ class PaperImporter:
             db.close()
 
     async def _import_one(self, db, imported: ImportedPaper, include_pdf: bool, stats: ImportStats) -> None:
+        paper = self._find_existing_paper(db, imported)
+        if paper is not None:
+            if include_pdf and imported.pdf_url:
+                if self._pdf_completed(paper) and await self.vector_store.has_paper_chunks(paper.id):
+                    stats.inc("pdf_already_processed")
+                else:
+                    stats.inc("pdf_retried")
+                    await self.vector_store.delete_paper_chunks(paper.id)
+                    pdf_result = await self._try_process_pdf(paper_id=paper.id, imported=imported, stats=stats)
+                    self._set_pdf_metadata(paper, pdf_result)
+                    db.commit()
+            stats.inc("skipped_duplicate")
+            return
+
         abstract_text = f"{imported.title}\n\n{imported.abstract}".strip()
         abstract_vector = await self.embeddings.embed_text(abstract_text)
 
-        paper = self._find_existing_paper(db, imported)
-        is_created = paper is None
-        if paper is None:
-            paper = Paper(id=uuid4())
-            db.add(paper)
+        paper = Paper(id=uuid4())
+        db.add(paper)
 
         self._apply_imported_fields(paper, imported)
         await self.vector_store.upsert_paper_abstract(
@@ -178,10 +236,11 @@ class PaperImporter:
         stats.inc("abstract_vectorized")
 
         if include_pdf and imported.pdf_url:
-            await self._try_process_pdf(paper_id=paper.id, imported=imported, stats=stats)
+            pdf_result = await self._try_process_pdf(paper_id=paper.id, imported=imported, stats=stats)
+            self._set_pdf_metadata(paper, pdf_result)
 
         db.commit()
-        stats.inc("created" if is_created else "updated")
+        stats.inc("created")
 
     def _find_existing_paper(self, db, imported: ImportedPaper) -> Paper | None:
         filters = [(Paper.source == imported.source) & (Paper.source_id == imported.source_id)]
@@ -201,14 +260,14 @@ class PaperImporter:
         paper.citation_count = imported.citation_count
         paper.metadata_json = imported.metadata
 
-    async def _try_process_pdf(self, paper_id: UUID, imported: ImportedPaper, stats: ImportStats) -> None:
+    async def _try_process_pdf(self, paper_id: UUID, imported: ImportedPaper, stats: ImportStats) -> PDFProcessResult:
         try:
             pdf_bytes = await self._download_pdf(imported.pdf_url)
             text = self._extract_pdf_text(pdf_bytes)
             chunks = self._chunk_text(text)
             if not chunks:
                 stats.inc("pdf_skipped")
-                return
+                return PDFProcessResult(success=False, error="PDF text extraction produced no chunks")
 
             for index, chunk in enumerate(chunks):
                 vector = await self.embeddings.embed_text(chunk)
@@ -225,9 +284,22 @@ class PaperImporter:
                     },
                 )
             stats.inc("pdf_processed")
+            return PDFProcessResult(success=True, chunk_count=len(chunks))
         except Exception as exc:
             stats.inc("pdf_skipped")
             stats.append_error(f"{imported.source}:{imported.source_id} PDF skipped: {exc}")
+            return PDFProcessResult(success=False, error=str(exc))
+
+    def _pdf_completed(self, paper: Paper) -> bool:
+        metadata = paper.metadata_json if isinstance(paper.metadata_json, dict) else {}
+        return metadata.get("pdf_status") == "completed" and int(metadata.get("pdf_chunk_count") or 0) > 0
+
+    def _set_pdf_metadata(self, paper: Paper, result: PDFProcessResult) -> None:
+        metadata = dict(paper.metadata_json or {})
+        metadata["pdf_status"] = "completed" if result.success else "failed"
+        metadata["pdf_chunk_count"] = result.chunk_count
+        metadata["pdf_last_error"] = result.error
+        paper.metadata_json = metadata
 
     async def _download_pdf(self, pdf_url: str | None) -> bytes:
         if not pdf_url:
@@ -305,6 +377,34 @@ class PaperImporter:
             },
         )
 
+    def _to_candidate(self, paper: ImportedPaper) -> ImportCandidatePaper:
+        return ImportCandidatePaper(
+            title=paper.title,
+            authors=paper.authors,
+            abstract=paper.abstract,
+            doi=paper.doi,
+            source=paper.source,
+            source_id=paper.source_id,
+            published_date=paper.published_date,
+            pdf_url=paper.pdf_url,
+            citation_count=paper.citation_count,
+            metadata=paper.metadata,
+        )
+
+    def _from_candidate(self, candidate: ImportCandidatePaper) -> ImportedPaper:
+        return ImportedPaper(
+            title=candidate.title,
+            authors=candidate.authors,
+            abstract=candidate.abstract,
+            doi=candidate.doi,
+            source=candidate.source,
+            source_id=candidate.source_id,
+            published_date=candidate.published_date,
+            pdf_url=candidate.pdf_url,
+            citation_count=candidate.citation_count,
+            metadata=candidate.metadata,
+        )
+
     def _extract_arxiv_pdf_url(self, entry: ET.Element, source_id: str) -> str:
         for link in entry.findall("atom:link", ATOM_NS):
             if link.attrib.get("title") == "pdf" and link.attrib.get("href"):
@@ -334,6 +434,8 @@ class PaperImporter:
         values = stats.values
         return (
             f"Fetched {values['fetched']} papers, created {values['created']}, "
-            f"updated {values['updated']}, skipped no abstract {values['skipped_no_abstract']}, "
+            f"updated {values['updated']}, skipped duplicate {values['skipped_duplicate']}, "
+            f"skipped no abstract {values['skipped_no_abstract']}, "
+            f"pdf retried {values['pdf_retried']}, pdf already processed {values['pdf_already_processed']}, "
             f"skipped embedding/vector {values['skipped_embedding_failed']}, failed {values['failed']}."
         )

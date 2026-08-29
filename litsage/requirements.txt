@@ -2,7 +2,7 @@ fastapi==0.116.1
 uvicorn[standard]==0.35.0
 pydantic-settings==2.10.1
 SQLAlchemy==2.0.42
-psycopg[binary]==3.2.9
+psycopg[binary]
 alembic==1.16.4
 redis==6.4.0
 celery==5.5.3
@@ -10,8 +10,8 @@ python-jose[cryptography]==3.5.0
 email-validator==2.2.0
 httpx==0.28.1
 pymupdf==1.26.3
-streamlit==1.48.1
+streamlit
 requests==2.32.4
-pymilvus==2.5.14
+pymilvus
 pytest==8.4.1
 pytest-asyncio==1.1.0

@@ -91,6 +91,34 @@ class VectorStore:
         )
         return self._to_hits(results)
 
+    async def has_paper_chunks(self, paper_id: UUID) -> bool:
+        if not self.client.has_collection(settings.chunk_collection):
+            return False
+        results = self.client.query(
+            collection_name=settings.chunk_collection,
+            filter=f'paper_id == "{paper_id}"',
+            output_fields=["id"],
+            limit=1,
+        )
+        return bool(results)
+
+    async def delete_paper_vectors(self, paper_id: UUID) -> dict[str, int | str]:
+        paper_id_value = str(paper_id)
+        filter_expr = f'paper_id == "{paper_id_value}"'
+        abstract_result = self._delete_by_filter(settings.abstract_collection, filter_expr)
+        chunk_result = self._delete_by_filter(settings.chunk_collection, filter_expr)
+        return {
+            "paper_id": paper_id_value,
+            "abstract_collection": settings.abstract_collection,
+            "chunk_collection": settings.chunk_collection,
+            "abstract_deleted": self._deleted_count(abstract_result),
+            "chunks_deleted": self._deleted_count(chunk_result),
+        }
+
+    async def delete_paper_chunks(self, paper_id: UUID) -> int:
+        result = self._delete_by_filter(settings.chunk_collection, f'paper_id == "{paper_id}"')
+        return self._deleted_count(result)
+
     def _ensure_collections(self) -> None:
         self._ensure_abstract_collection()
         self._ensure_chunk_collection()
@@ -149,6 +177,19 @@ class VectorStore:
     def _validate_vector(self, vector: list[float]) -> None:
         if len(vector) != settings.embedding_dim:
             raise VectorStoreError(f"Expected vector dim {settings.embedding_dim}, got {len(vector)}")
+
+    def _delete_by_filter(self, collection_name: str, filter_expr: str) -> dict:
+        if not self.client.has_collection(collection_name):
+            return {"delete_count": 0}
+        result = self.client.delete(collection_name=collection_name, filter=filter_expr)
+        return result if isinstance(result, dict) else {}
+
+    def _deleted_count(self, result: dict) -> int:
+        for key in ("delete_count", "delete_cnt", "deleted_count"):
+            value = result.get(key)
+            if isinstance(value, int):
+                return value
+        return 0
 
     def _to_hits(self, results: list) -> list[VectorHit]:
         hits: list[VectorHit] = []
