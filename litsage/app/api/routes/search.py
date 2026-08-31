@@ -14,10 +14,21 @@ async def semantic_search(
     year_to: int | None = None,
     author: str | None = None,
     source: str | None = None,
+    journal: str | None = None,
+    citation_min: int | None = Query(default=None, ge=0),
+    citation_max: int | None = Query(default=None, ge=0),
     limit: int = Query(default=20, ge=1, le=50),
     user_id: str = Depends(get_current_user_id),
 ) -> SearchResponse:
-    filters = SearchFilters(year_from=year_from, year_to=year_to, author=author, source=source)
+    filters = SearchFilters(
+        year_from=year_from,
+        year_to=year_to,
+        author=author,
+        source=source,
+        journal=journal,
+        citation_min=citation_min,
+        citation_max=citation_max,
+    )
     return await SearchService().search(query=q, filters=filters, limit=limit, user_id=user_id)
 
 

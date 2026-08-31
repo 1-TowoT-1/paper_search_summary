@@ -97,6 +97,10 @@ class SearchResponse(BaseModel):
     rewritten_queries: list[str]
     total: int
     results: list[SearchResult]
+    external_total: int = 0
+    external_results: list["ExternalSearchResult"] = []
+    external_stats: dict[str, int | list[str]] = {}
+    used_external_fallback: bool = False
     cache_hit: bool = False
 
 
@@ -129,6 +133,13 @@ class ImportCandidatePaper(BaseModel):
     pdf_url: str | None = None
     citation_count: int = 0
     metadata: dict = {}
+
+
+class ExternalSearchResult(BaseModel):
+    paper: ImportCandidatePaper
+    source: str
+    score: float | None = None
+    reason: str = "external_fallback"
 
 
 class ImportPreviewResponse(BaseModel):

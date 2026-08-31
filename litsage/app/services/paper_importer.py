@@ -27,6 +27,8 @@ from app.services.vector_store import VectorStore, VectorStoreError
 
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
+PUBMED_ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+PUBMED_EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
 
 @dataclass
@@ -145,26 +147,39 @@ class PaperImporter:
         await self.import_papers(papers=papers, include_pdf=payload.include_pdf, stats=stats)
         return stats.values
 
-    async def fetch_from_sources(self, payload: ImportPapersRequest, stats: ImportStats) -> list[ImportedPaper]:
+    async def fetch_from_sources(
+        self,
+        payload: ImportPapersRequest,
+        stats: ImportStats,
+        year_from: int | None = None,
+        year_to: int | None = None,
+    ) -> list[ImportedPaper]:
         imported: list[ImportedPaper] = []
         for source in payload.sources:
             try:
                 if source == LiteratureSource.arxiv:
-                    imported.extend(await self.fetch_arxiv(payload.query, payload.limit, stats))
+                    imported.extend(await self.fetch_arxiv(payload.query, payload.limit, stats, year_from, year_to))
                 elif source == LiteratureSource.semantic_scholar:
                     stats.error("Semantic Scholar importer is reserved but not implemented yet.")
                 elif source == LiteratureSource.pubmed:
-                    stats.error("PubMed importer is reserved but not implemented yet.")
+                    imported.extend(await self.fetch_pubmed(payload.query, payload.limit, stats, year_from, year_to))
             except Exception as exc:
                 stats.error(f"{source.value} fetch failed: {exc}")
-        return imported[: payload.limit]
+        return self._dedupe_imported(self._rank_external_candidates(query=payload.query, papers=imported))[: payload.limit]
 
-    async def fetch_arxiv(self, query: str, limit: int, stats: ImportStats) -> list[ImportedPaper]:
+    async def fetch_arxiv(
+        self,
+        query: str,
+        limit: int,
+        stats: ImportStats,
+        year_from: int | None = None,
+        year_to: int | None = None,
+    ) -> list[ImportedPaper]:
         params = {
-            "search_query": f"all:{query}",
+            "search_query": self._build_arxiv_query(query, year_from, year_to),
             "start": 0,
-            "max_results": limit,
-            "sortBy": "submittedDate",
+            "max_results": self._external_candidate_limit(limit),
+            "sortBy": "relevance",
             "sortOrder": "descending",
         }
         async with httpx.AsyncClient(timeout=settings.external_api_timeout_seconds) as client:
@@ -180,7 +195,86 @@ class PaperImporter:
                 stats.inc("skipped_no_abstract")
                 continue
             papers.append(paper)
-        return papers
+        return self._rank_external_candidates(query=query, papers=papers)[:limit]
+
+    async def fetch_pubmed(
+        self,
+        query: str,
+        limit: int,
+        stats: ImportStats,
+        year_from: int | None = None,
+        year_to: int | None = None,
+    ) -> list[ImportedPaper]:
+        ids = await self._search_pubmed_ids(
+            query=query,
+            limit=self._external_candidate_limit(limit),
+            year_from=year_from,
+            year_to=year_to,
+        )
+        if not ids:
+            return []
+
+        params = {
+            "db": "pubmed",
+            "id": ",".join(ids),
+            "retmode": "xml",
+            "tool": settings.app_name,
+        }
+        if settings.pubmed_email:
+            params["email"] = settings.pubmed_email
+        if settings.pubmed_api_key:
+            params["api_key"] = settings.pubmed_api_key
+
+        async with httpx.AsyncClient(timeout=settings.external_api_timeout_seconds) as client:
+            response = await client.get(PUBMED_EFETCH_URL, params=params)
+            response.raise_for_status()
+
+        root = ET.fromstring(response.text)
+        papers: list[ImportedPaper] = []
+        for article in root.findall(".//PubmedArticle"):
+            paper = self._parse_pubmed_article(article)
+            stats.inc("fetched")
+            if not paper.abstract.strip():
+                stats.inc("skipped_no_abstract")
+                continue
+            papers.append(paper)
+        return self._rank_external_candidates(query=query, papers=papers)[:limit]
+
+    async def _search_pubmed_ids(
+        self,
+        query: str,
+        limit: int,
+        year_from: int | None = None,
+        year_to: int | None = None,
+    ) -> list[str]:
+        params = {
+            "db": "pubmed",
+            "term": self._build_pubmed_query(query, year_from, year_to),
+            "retmode": "json",
+            "retmax": limit,
+            "sort": "relevance",
+            "tool": settings.app_name,
+        }
+        if settings.pubmed_email:
+            params["email"] = settings.pubmed_email
+        if settings.pubmed_api_key:
+            params["api_key"] = settings.pubmed_api_key
+
+        async with httpx.AsyncClient(timeout=settings.external_api_timeout_seconds) as client:
+            response = await client.get(PUBMED_ESEARCH_URL, params=params)
+            response.raise_for_status()
+        payload = response.json()
+        ids = payload.get("esearchresult", {}).get("idlist", [])
+        if ids:
+            return [str(item) for item in ids]
+        if params["term"] == query:
+            return []
+        params["term"] = self._build_pubmed_native_query(query, year_from, year_to)
+        async with httpx.AsyncClient(timeout=settings.external_api_timeout_seconds) as client:
+            response = await client.get(PUBMED_ESEARCH_URL, params=params)
+            response.raise_for_status()
+        payload = response.json()
+        return [str(item) for item in payload.get("esearchresult", {}).get("idlist", [])]
 
     async def import_papers(self, papers: list[ImportedPaper], include_pdf: bool, stats: ImportStats) -> None:
         db = SessionLocal()
@@ -377,6 +471,42 @@ class PaperImporter:
             },
         )
 
+    def _parse_pubmed_article(self, article: ET.Element) -> ImportedPaper:
+        pmid = self._text(article, ".//MedlineCitation/PMID")
+        title = self._clean_text(self._iter_text(article.find(".//ArticleTitle")))
+        abstract = self._clean_text(
+            " ".join(
+                self._abstract_text_with_label(node)
+                for node in article.findall(".//Abstract/AbstractText")
+                if self._iter_text(node)
+            )
+        )
+        journal = self._clean_text(self._text(article, ".//Journal/Title"))
+        journal_iso = self._clean_text(self._text(article, ".//Journal/ISOAbbreviation"))
+        doi = self._pubmed_doi(article)
+        published_date = self._parse_pubmed_date(article)
+
+        return ImportedPaper(
+            title=title or f"PubMed {pmid}",
+            authors=self._parse_pubmed_authors(article),
+            abstract=abstract,
+            doi=doi,
+            source=LiteratureSource.pubmed.value,
+            source_id=pmid,
+            published_date=published_date,
+            pdf_url=None,
+            citation_count=0,
+            metadata={
+                "pmid": pmid,
+                "journal": journal,
+                "journal_iso": journal_iso,
+                "publication_types": [
+                    self._clean_text(self._iter_text(node))
+                    for node in article.findall(".//PublicationTypeList/PublicationType")
+                ],
+            },
+        )
+
     def _to_candidate(self, paper: ImportedPaper) -> ImportCandidatePaper:
         return ImportCandidatePaper(
             title=paper.title,
@@ -415,6 +545,14 @@ class PaperImporter:
         child = element.find(path, ATOM_NS)
         return child.text.strip() if child is not None and child.text else ""
 
+    def _iter_text(self, element: ET.Element | None) -> str:
+        return "".join(element.itertext()).strip() if element is not None else ""
+
+    def _abstract_text_with_label(self, element: ET.Element) -> str:
+        text = self._clean_text(self._iter_text(element))
+        label = element.attrib.get("Label")
+        return f"{label}: {text}" if label else text
+
     def _clean_text(self, text: str) -> str:
         return re.sub(r"\s+", " ", text).strip()
 
@@ -426,9 +564,165 @@ class PaperImporter:
         except ValueError:
             return None
 
+    def _parse_pubmed_date(self, article: ET.Element) -> date | None:
+        article_date = article.find(".//ArticleDate")
+        parsed = self._parse_pubmed_date_node(article_date)
+        if parsed:
+            return parsed
+        return self._parse_pubmed_date_node(article.find(".//JournalIssue/PubDate"))
+
+    def _parse_pubmed_date_node(self, node: ET.Element | None) -> date | None:
+        if node is None:
+            return None
+        year = self._node_child_text(node, "Year")
+        month = self._node_child_text(node, "Month")
+        day = self._node_child_text(node, "Day")
+        if not year or not year.isdigit():
+            medline_date = self._node_child_text(node, "MedlineDate")
+            year_match = re.search(r"\d{4}", medline_date)
+            year = year_match.group(0) if year_match else ""
+        if not year:
+            return None
+        return date(int(year), self._pubmed_month_to_int(month), int(day) if day.isdigit() else 1)
+
+    def _pubmed_month_to_int(self, value: str) -> int:
+        if not value:
+            return 1
+        if value.isdigit():
+            return max(1, min(int(value), 12))
+        months = {
+            "jan": 1,
+            "feb": 2,
+            "mar": 3,
+            "apr": 4,
+            "may": 5,
+            "jun": 6,
+            "jul": 7,
+            "aug": 8,
+            "sep": 9,
+            "oct": 10,
+            "nov": 11,
+            "dec": 12,
+        }
+        return months.get(value[:3].lower(), 1)
+
+    def _node_child_text(self, node: ET.Element, child_name: str) -> str:
+        child = node.find(child_name)
+        return child.text.strip() if child is not None and child.text else ""
+
     def _chunk_id(self, paper_id: UUID, index: int) -> str:
         digest = hashlib.sha1(f"{paper_id}:{index}".encode("utf-8")).hexdigest()[:16]
         return f"{paper_id}:{digest}:{index}"
+
+    def _build_arxiv_query(self, query: str, year_from: int | None = None, year_to: int | None = None) -> str:
+        terms = self._query_terms(query)
+        if not terms:
+            clauses = [f"all:{query}"]
+        else:
+            clauses = [f"(ti:{term} OR abs:{term})" for term in terms[:8]]
+        if year_from or year_to:
+            start_year = year_from or 1900
+            end_year = year_to or 2100
+            clauses.append(f"submittedDate:[{start_year}01010000 TO {end_year}12312359]")
+        return " AND ".join(clauses)
+
+    def _build_pubmed_query(self, query: str, year_from: int | None = None, year_to: int | None = None) -> str:
+        terms = self._query_terms(query)
+        if not terms:
+            return self._build_pubmed_native_query(query, year_from, year_to)
+        clauses = [f'("{term}"[Title/Abstract])' for term in terms[:8]]
+        if year_from or year_to:
+            clauses.append(self._pubmed_date_clause(year_from, year_to))
+        return " AND ".join(clauses)
+
+    def _build_pubmed_native_query(self, query: str, year_from: int | None = None, year_to: int | None = None) -> str:
+        if not year_from and not year_to:
+            return query
+        return f"({query}) AND {self._pubmed_date_clause(year_from, year_to)}"
+
+    def _pubmed_date_clause(self, year_from: int | None, year_to: int | None) -> str:
+        start_year = year_from or 1900
+        end_year = year_to or 2100
+        return f'("{start_year}/01/01"[Date - Publication] : "{end_year}/12/31"[Date - Publication])'
+
+    def _parse_pubmed_authors(self, article: ET.Element) -> list[dict]:
+        authors: list[dict] = []
+        for author in article.findall(".//AuthorList/Author"):
+            collective = self._node_child_text(author, "CollectiveName")
+            if collective:
+                authors.append({"name": collective})
+                continue
+            last_name = self._node_child_text(author, "LastName")
+            fore_name = self._node_child_text(author, "ForeName")
+            initials = self._node_child_text(author, "Initials")
+            name = self._clean_text(" ".join(part for part in [fore_name or initials, last_name] if part))
+            if name:
+                authors.append({"name": name})
+        return authors
+
+    def _pubmed_doi(self, article: ET.Element) -> str | None:
+        for node in article.findall(".//ArticleIdList/ArticleId"):
+            if node.attrib.get("IdType") == "doi" and node.text:
+                return node.text.strip()
+        for node in article.findall(".//ELocationID"):
+            if node.attrib.get("EIdType") == "doi" and node.text:
+                return node.text.strip()
+        return None
+
+    def _rank_external_candidates(self, query: str, papers: list[ImportedPaper]) -> list[ImportedPaper]:
+        terms = set(self._query_terms(query))
+        if not terms:
+            return papers
+
+        def score(paper: ImportedPaper) -> tuple[float, date]:
+            title = paper.title.lower()
+            abstract = paper.abstract.lower()
+            title_hits = sum(1 for term in terms if term in title)
+            abstract_hits = sum(1 for term in terms if term in abstract)
+            published = paper.published_date or date.min
+            return (title_hits * 3 + abstract_hits, published)
+
+        ranked = sorted(papers, key=score, reverse=True)
+        return [paper for paper in ranked if score(paper)[0] > 0]
+
+    def _dedupe_imported(self, papers: list[ImportedPaper]) -> list[ImportedPaper]:
+        deduped: list[ImportedPaper] = []
+        seen: set[tuple[str, str]] = set()
+        for paper in papers:
+            key = (paper.source, paper.source_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(paper)
+        return deduped
+
+    def _external_candidate_limit(self, limit: int) -> int:
+        multiplier = max(1, settings.search_external_candidate_multiplier)
+        return max(limit * multiplier, limit)
+
+    def _query_terms(self, query: str) -> list[str]:
+        stop_words = {
+            "the",
+            "and",
+            "for",
+            "with",
+            "using",
+            "use",
+            "uses",
+            "into",
+            "from",
+            "that",
+            "this",
+            "中的",
+            "应用",
+            "研究",
+        }
+        terms = []
+        for term in re.findall(r"[\w\u4e00-\u9fff]+", query.lower()):
+            if len(term) < 2 or term in stop_words:
+                continue
+            terms.append(term)
+        return list(dict.fromkeys(terms))
 
     def _build_message(self, stats: ImportStats) -> str:
         values = stats.values

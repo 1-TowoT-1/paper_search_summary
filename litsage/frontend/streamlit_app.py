@@ -253,6 +253,10 @@ def render_search() -> None:
     year_to = col2.number_input("结束年份", min_value=1900, max_value=2100, value=None, step=1)
     author = col3.text_input("作者")
     source = col4.selectbox("来源", ["", "arxiv", "semantic_scholar", "pubmed"])
+    col5, col6, col7 = st.columns(3)
+    journal = col5.text_input("期刊")
+    citation_min = col6.number_input("最低引用数", min_value=0, value=None, step=1)
+    citation_max = col7.number_input("最高引用数", min_value=0, value=None, step=1)
     limit = st.slider("返回数量", 1, 50, 20)
 
     if st.button("开始搜索", type="primary"):
@@ -265,11 +269,18 @@ def render_search() -> None:
             params["author"] = author
         if source:
             params["source"] = source
+        if journal:
+            params["journal"] = journal
+        if citation_min is not None:
+            params["citation_min"] = int(citation_min)
+        if citation_max is not None:
+            params["citation_max"] = int(citation_max)
 
         try:
             body = show_response(request("GET", "/api/search", params=params))
             if isinstance(body, dict):
                 st.session_state["last_search_results"] = body.get("results", [])
+                render_search_results(body)
         except requests.RequestException as exc:
             st.error(f"搜索请求失败: {exc}")
 
@@ -280,6 +291,75 @@ def render_search() -> None:
                 show_response(local_request("POST", api_url("/api/search/rewrite"), params={"q": rewrite_query}, timeout=30))
             except requests.RequestException as exc:
                 st.error(f"查询改写失败: {exc}")
+
+
+def render_search_results(body: dict[str, Any]) -> None:
+    results = body.get("results") or []
+    external_results = body.get("external_results") or []
+    if not results and not external_results:
+        st.info("没有检索到匹配文献")
+        return
+
+    st.caption(
+        f"命中 {body.get('total', len(results))} 篇候选文献，返回 {len(results)} 篇；"
+        f"外部补充 {body.get('external_total', len(external_results))} 篇；"
+        f"缓存命中：{'是' if body.get('cache_hit') else '否'}"
+    )
+    rewritten = body.get("rewritten_queries") or []
+    if rewritten:
+        st.write("改写查询：", " / ".join(rewritten))
+    external_stats = body.get("external_stats") or {}
+    if external_stats:
+        st.caption(
+            "外部补充统计："
+            f"需要补 {external_stats.get('needed', 0)}，"
+            f"抓取候选 {external_stats.get('fetched', 0)}，"
+            f"通过过滤 {external_stats.get('accepted', 0)}，"
+            f"年份过滤 {external_stats.get('filtered_year', 0)}，"
+            f"作者过滤 {external_stats.get('filtered_author', 0)}，"
+            f"期刊过滤 {external_stats.get('filtered_journal', 0)}。"
+        )
+
+    rows = []
+    for item in results:
+        paper = item.get("paper", {})
+        authors = ", ".join(author.get("name", "") for author in paper.get("authors", [])[:3])
+        rows.append(
+            {
+                "分数": round(float(item.get("score", 0)), 4),
+                "标题": paper.get("title", ""),
+                "作者": authors,
+                "年份": (paper.get("published_date") or "")[:4],
+                "来源": paper.get("source", ""),
+                "文献ID": paper.get("source_id", ""),
+                "DOI": paper.get("doi", ""),
+                "引用数": paper.get("citation_count", 0),
+                "摘要片段": " ".join(item.get("highlights", [])[1:]) or (paper.get("abstract") or "")[:220],
+            }
+        )
+    if rows:
+        st.markdown("**本地数据库结果**")
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    if external_results:
+        st.markdown("**外部文献源补充结果**")
+        external_rows = []
+        for item in external_results:
+            paper = item.get("paper", {})
+            authors = ", ".join(author.get("name", "") for author in paper.get("authors", [])[:3])
+            external_rows.append(
+                {
+                    "来源": item.get("source", paper.get("source", "")),
+                    "标题": paper.get("title", ""),
+                    "作者": authors,
+                    "年份": (paper.get("published_date") or "")[:4],
+                    "文献ID": paper.get("source_id", ""),
+                    "DOI": paper.get("doi", ""),
+                    "PDF": paper.get("pdf_url", ""),
+                    "摘要": (paper.get("abstract") or "")[:260],
+                }
+            )
+        st.dataframe(external_rows, use_container_width=True, hide_index=True)
 
 
 def render_import() -> None:

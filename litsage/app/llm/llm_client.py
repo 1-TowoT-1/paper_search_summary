@@ -26,13 +26,15 @@ class LLMClient:
 
     async def rewrite_query(self, query: str) -> list[str]:
         system_prompt = (
-            "你是科研文献检索专家。请把用户查询改写成 2-3 个互补的检索查询，"
-            "用于提高语义检索召回率。保留关键术语，不要添加用户没有表达的硬性限制。"
+            "You are an expert academic literature search assistant. Rewrite the user query into "
+            "2-3 complementary English literature retrieval queries. If the user query is Chinese, "
+            "translate the intent into precise English academic terms first. Preserve key domain "
+            "concepts and do not add hard constraints that the user did not express."
         )
         user_prompt = (
-            "请只返回 JSON，格式为：\n"
-            '{"queries": ["查询1", "查询2", "查询3"]}\n\n'
-            f"用户查询：{query}"
+            "Return JSON only, with this schema:\n"
+            '{"queries": ["english query 1", "english query 2", "english query 3"]}\n\n'
+            f"User query: {query}"
         )
 
         try:
@@ -245,9 +247,14 @@ class LLMClient:
         query = query.strip()
         if not query:
             return []
+        if self._contains_cjk(query):
+            return [query]
         if len(query.split()) <= 2:
             return [query, f"{query} survey", f"{query} recent advances"]
         return [query, f"{query} applications", f"{query} methods comparison"]
+
+    def _contains_cjk(self, text: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", text))
 
     def _clip(self, text: str, max_chars: int) -> str:
         text = text.strip()

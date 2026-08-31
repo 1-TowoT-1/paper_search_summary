@@ -1,4 +1,5 @@
 from datetime import date
+import xml.etree.ElementTree as ET
 from uuid import uuid4
 
 import pytest
@@ -9,6 +10,7 @@ from app.models.db import Paper
 from app.models.schemas import ImportCandidatePaper
 from app.services.email_verification_service import EmailVerificationService
 from app.services.paper_importer import ImportedPaper, ImportStats, PaperImporter
+from app.services.search_service import SearchService
 from app.services.summary_service import SummaryService
 
 
@@ -69,6 +71,87 @@ def test_import_candidate_round_trip() -> None:
     assert candidate.title == paper.title
     assert restored.source_id == paper.source_id
     assert restored.metadata["primary_category"] == "cs.CV"
+
+
+def test_pubmed_query_uses_title_abstract_fields() -> None:
+    importer = PaperImporter()
+
+    query = importer._build_pubmed_query("liver cancer diagnosis deep learning", 2025, 2026)
+
+    assert '"liver"[Title/Abstract]' in query
+    assert '"cancer"[Title/Abstract]' in query
+    assert '"2025/01/01"[Date - Publication]' in query
+    assert '"2026/12/31"[Date - Publication]' in query
+    assert " AND " in query
+
+
+def test_external_queries_prefer_english_rewrites_for_chinese_query() -> None:
+    service = SearchService()
+
+    queries = service._external_queries(
+        query="肝癌 深度学习 诊断",
+        rewritten_queries=[
+            "肝癌 深度学习 诊断",
+            "liver cancer diagnosis deep learning",
+            "hepatocellular carcinoma detection using neural networks",
+        ],
+    )
+
+    assert queries == [
+        "liver cancer diagnosis deep learning",
+        "hepatocellular carcinoma detection using neural networks",
+    ]
+
+
+def test_parse_pubmed_article_metadata() -> None:
+    importer = PaperImporter()
+    article = ET.fromstring(
+        """
+        <PubmedArticle>
+          <MedlineCitation>
+            <PMID>123456</PMID>
+            <Article>
+              <ArticleTitle>Deep learning for liver cancer diagnosis.</ArticleTitle>
+              <Journal>
+                <Title>Journal of Medical AI</Title>
+                <ISOAbbreviation>J Med AI</ISOAbbreviation>
+                <JournalIssue>
+                  <PubDate>
+                    <Year>2025</Year>
+                    <Month>Mar</Month>
+                    <Day>9</Day>
+                  </PubDate>
+                </JournalIssue>
+              </Journal>
+              <AuthorList>
+                <Author>
+                  <ForeName>Ada</ForeName>
+                  <LastName>Chen</LastName>
+                </Author>
+              </AuthorList>
+              <Abstract>
+                <AbstractText>We study hepatocellular carcinoma diagnosis using deep learning.</AbstractText>
+              </Abstract>
+            </Article>
+          </MedlineCitation>
+          <PubmedData>
+            <ArticleIdList>
+              <ArticleId IdType="doi">10.1000/pubmed.test</ArticleId>
+            </ArticleIdList>
+          </PubmedData>
+        </PubmedArticle>
+        """
+    )
+
+    paper = importer._parse_pubmed_article(article)
+
+    assert paper.source == "pubmed"
+    assert paper.source_id == "123456"
+    assert paper.title == "Deep learning for liver cancer diagnosis."
+    assert paper.authors == [{"name": "Ada Chen"}]
+    assert paper.doi == "10.1000/pubmed.test"
+    assert paper.published_date == date(2025, 3, 9)
+    assert paper.metadata["journal"] == "Journal of Medical AI"
 
 
 class ExistingPaperQuery:

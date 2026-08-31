@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     llm_max_output_tokens: int = 1600
 
     search_cache_ttl_seconds: int = 600
+    search_local_min_results: int = 5
+    search_local_min_score: float = 0.4
+    search_external_candidate_multiplier: int = 10
     paper_summary_ttl_seconds: int = 86400
     rate_limit_per_minute: int = 20
 
