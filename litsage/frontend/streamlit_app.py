@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import requests
@@ -67,10 +68,14 @@ def render_import_status_summary(body: dict[str, Any]) -> None:
         ("新入库", "created"),
         ("重复跳过", "skipped_duplicate"),
         ("摘要向量", "abstract_vectorized"),
+        ("PDF 链接", "pdf_resolved"),
+        ("PDF 未找到", "pdf_unresolved"),
         ("PDF 补跑", "pdf_retried"),
         ("PDF 已存在", "pdf_already_processed"),
         ("PDF 成功", "pdf_processed"),
         ("PDF 失败", "pdf_skipped"),
+        ("需手动补 PDF", "manual_pdf_required"),
+        ("项目绑定", "project_linked"),
         ("失败", "failed"),
     ]
     columns = st.columns(3)
@@ -80,6 +85,10 @@ def render_import_status_summary(body: dict[str, Any]) -> None:
     messages = []
     if stats.get("created", 0):
         messages.append(f"{stats['created']} 篇新文献已写入 PostgreSQL，并已写入摘要向量。")
+    if stats.get("pdf_resolved", 0):
+        messages.append(f"{stats['pdf_resolved']} 篇文献已解析到全文 PDF 链接。")
+    if stats.get("pdf_unresolved", 0):
+        messages.append(f"{stats['pdf_unresolved']} 篇文献未找到可直接下载的全文 PDF，已保留摘要入库流程。")
     if stats.get("skipped_duplicate", 0) and stats.get("pdf_already_processed", 0):
         messages.append(f"{stats['pdf_already_processed']} 篇文献已存在，且 PDF 全文分块也已存在，因此完全跳过。")
     if stats.get("skipped_duplicate", 0) and stats.get("pdf_retried", 0):
@@ -88,6 +97,14 @@ def render_import_status_summary(body: dict[str, Any]) -> None:
         messages.append(f"{stats['pdf_processed']} 篇文献的 PDF 已解析并写入全文分块向量。")
     if stats.get("pdf_skipped", 0):
         messages.append(f"{stats['pdf_skipped']} 篇文献 PDF 下载、解析或向量化失败；文献元数据可能仍已入库。")
+    if stats.get("manual_pdf_required", 0):
+        messages.append(
+            f"{stats['manual_pdf_required']} 篇文献自动获取全文被验证码、权限或站点策略阻断，需要用户手动下载 PDF 后上传补全文。"
+        )
+    if stats.get("project_linked", 0):
+        messages.append(f"{stats['project_linked']} 篇文献已绑定到所选项目。")
+    if stats.get("project_already_linked", 0):
+        messages.append(f"{stats['project_already_linked']} 篇文献此前已在所选项目中。")
     if stats.get("skipped_embedding_failed", 0):
         messages.append(f"{stats['skipped_embedding_failed']} 篇文献摘要向量化失败，因此没有完成入库。")
     if stats.get("skipped_no_abstract", 0):
@@ -100,12 +117,27 @@ def render_import_status_summary(body: dict[str, Any]) -> None:
     for message in messages:
         st.write(f"- {message}")
 
+    manual_papers = stats.get("manual_pdf_required_papers") or []
+    if manual_papers:
+        with st.expander("需要手动补 PDF 的文献"):
+            for item in manual_papers:
+                st.write(f"- {item}")
+
 
 def request(method: str, path: str, **kwargs: Any) -> requests.Response:
     headers = kwargs.pop("headers", {})
     timeout = kwargs.pop("timeout", 30)
     headers.update(auth_headers())
     return local_request(method, api_url(path), headers=headers, timeout=timeout, **kwargs)
+
+
+def doi_to_url(doi: str | None) -> str:
+    value = str(doi or "").strip()
+    if not value:
+        return ""
+    if value.lower().startswith(("http://", "https://")):
+        return value
+    return f"https://doi.org/{value}"
 
 
 def remember_auth(access_token: str, token_type: str, username: str = "") -> None:
@@ -137,6 +169,378 @@ def refresh_current_user() -> None:
             clear_auth()
     except requests.RequestException:
         pass
+
+
+def fetch_projects(show_error: bool = False) -> list[dict[str, Any]]:
+    try:
+        response = request("GET", "/api/projects", timeout=15)
+        if response.ok:
+            body = response.json()
+            if isinstance(body, list):
+                st.session_state["projects"] = body
+                return body
+        elif show_error:
+            show_response(response)
+    except requests.RequestException as exc:
+        if show_error:
+            st.error(f"获取项目失败: {exc}")
+    return st.session_state.get("projects", [])
+
+
+def render_project_selector(label: str, key: str) -> str:
+    projects = fetch_projects()
+    options = ["个人资料库（不绑定项目）"] + [
+        f"{project.get('name', '未命名项目')} | {project.get('id', '')}" for project in projects
+    ]
+    selected = st.selectbox(label, options, key=key)
+    if selected == options[0]:
+        return ""
+    return selected.rsplit(" | ", 1)[-1]
+
+
+def render_searchable_project_selector(prefix: str = "qa", optional: bool = False) -> str:
+    col_search, col_refresh = st.columns([4, 1])
+    keyword = col_search.text_input("搜索项目库", key=f"{prefix}_project_search", placeholder="输入项目名称关键词")
+    if col_refresh.button("刷新", use_container_width=True, key=f"{prefix}_refresh_projects"):
+        fetch_projects(show_error=True)
+
+    projects = fetch_projects()
+    if keyword.strip():
+        query = keyword.strip().lower()
+        projects = [project for project in projects if query in str(project.get("name", "")).lower()]
+
+    if not projects:
+        st.info("当前没有可选择的项目。请先在“项目”页面创建项目，或调整搜索关键词。")
+        return ""
+
+    options = [f"{project.get('name', '未命名项目')} | {project.get('id', '')}" for project in projects]
+    if optional:
+        options = ["不绑定项目"] + options
+    selected = st.selectbox("选择项目", options, key=f"{prefix}_project_selector")
+    if optional and selected == "不绑定项目":
+        return ""
+    return selected.rsplit(" | ", 1)[-1]
+
+
+def search_database_papers(prefix: str) -> list[dict[str, Any]]:
+    q = st.text_input("检索我的文献", placeholder="标题、摘要、DOI、作者、来源 ID", key=f"{prefix}_paper_q")
+    col_source, col_limit = st.columns([2, 1])
+    source = col_source.selectbox(
+        "来源",
+        ["", "pubmed", "arxiv", "semantic_scholar", "user_upload", "manual"],
+        key=f"{prefix}_paper_source",
+    )
+    limit = col_limit.slider("返回数量", 1, 100, 20, key=f"{prefix}_paper_limit")
+
+    if st.button("搜索文献", key=f"{prefix}_paper_search_button", use_container_width=True):
+        params: dict[str, Any] = {"limit": limit, "offset": 0}
+        if q.strip():
+            params["q"] = q.strip()
+        if source:
+            params["source"] = source
+        try:
+            body = show_response(request("GET", "/api/papers", params=params), show_body=False)
+            if isinstance(body, dict):
+                st.session_state[f"{prefix}_paper_results"] = body.get("results", [])
+        except requests.RequestException as exc:
+            st.error(f"检索文献失败: {exc}")
+
+    return st.session_state.get(f"{prefix}_paper_results", [])
+
+
+def render_paper_selection_table(papers: list[dict[str, Any]], key: str) -> list[str]:
+    if not papers:
+        return []
+
+    rows = []
+    for index, paper in enumerate(papers):
+        authors = ", ".join(
+            author_item.get("name", "")
+            for author_item in paper.get("authors", [])
+            if isinstance(author_item, dict)
+        )
+        rows.append(
+            {
+                "select": False,
+                "index": index,
+                "title": paper.get("title", ""),
+                "authors": authors,
+                "source": paper.get("source", ""),
+                "doi": paper.get("doi", ""),
+                "paper_id": paper.get("id", ""),
+            }
+        )
+
+    edited_rows = st.data_editor(
+        rows,
+        use_container_width=True,
+        hide_index=True,
+        disabled=["index", "title", "authors", "source", "doi", "paper_id"],
+        column_config={
+            "select": st.column_config.CheckboxColumn("选择"),
+            "index": st.column_config.NumberColumn("序号"),
+            "title": st.column_config.TextColumn("标题", width="large"),
+            "authors": st.column_config.TextColumn("作者", width="medium"),
+            "source": st.column_config.TextColumn("来源"),
+            "doi": st.column_config.TextColumn("DOI"),
+            "paper_id": st.column_config.TextColumn("文献 ID"),
+        },
+        key=key,
+    )
+    return [papers[row["index"]]["id"] for row in edited_rows if row.get("select")]
+
+
+def bind_papers_to_project(project_id: str, paper_ids: list[str]) -> dict[str, Any] | None:
+    if not project_id or not paper_ids:
+        return None
+    try:
+        body = show_response(
+            request(
+                "POST",
+                f"/api/projects/{project_id}/papers/batch",
+                json={"paper_ids": paper_ids},
+                timeout=60,
+            ),
+            show_body=False,
+        )
+        return body if isinstance(body, dict) else None
+    except requests.RequestException as exc:
+        st.error(f"绑定文献失败: {exc}")
+        return None
+
+
+def delete_selected_papers(paper_ids: list[str]) -> tuple[int, list[dict[str, Any]]]:
+    deleted_count = 0
+    failures: list[dict[str, Any]] = []
+    for paper_id in paper_ids:
+        try:
+            response = request("DELETE", f"/api/papers/{paper_id}", timeout=60)
+            if response.ok:
+                deleted_count += 1
+            else:
+                failures.append(
+                    {
+                        "paper_id": paper_id,
+                        "status_code": response.status_code,
+                        "message": response.text[:500],
+                    }
+                )
+        except requests.RequestException as exc:
+            failures.append({"paper_id": paper_id, "status_code": None, "message": str(exc)})
+    return deleted_count, failures
+
+
+def fetch_project_papers(project_id: str) -> list[dict[str, Any]]:
+    if not project_id:
+        return []
+    try:
+        body = show_response(request("GET", f"/api/projects/{project_id}/papers", timeout=60), show_body=False)
+        if isinstance(body, dict):
+            return body.get("results", [])
+    except requests.RequestException as exc:
+        st.error(f"获取项目文献失败: {exc}")
+    return []
+
+
+def fetch_project_qas(project_id: str) -> list[dict[str, Any]]:
+    if not project_id:
+        return []
+    try:
+        body = show_response(request("GET", f"/api/projects/{project_id}/qas", timeout=60), show_body=False)
+        if isinstance(body, dict):
+            return body.get("results", [])
+    except requests.RequestException as exc:
+        st.error(f"获取项目问答失败: {exc}")
+    return []
+
+
+def delete_project_qas(project_id: str, qa_ids: list[str]) -> dict[str, Any] | None:
+    if not project_id or not qa_ids:
+        return None
+    try:
+        body = show_response(
+            request(
+                "POST",
+                f"/api/projects/{project_id}/qas/delete",
+                json={"qa_ids": qa_ids},
+                timeout=60,
+            ),
+            show_body=False,
+        )
+        return body if isinstance(body, dict) else None
+    except requests.RequestException as exc:
+        st.error(f"删除项目问答失败: {exc}")
+    return None
+
+
+def delete_project_qa(project_id: str, qa_id: str) -> dict[str, Any] | None:
+    if not project_id or not qa_id:
+        return None
+    try:
+        body = show_response(
+            request("DELETE", f"/api/projects/{project_id}/qas/{qa_id}", timeout=60),
+            show_body=False,
+        )
+        return body if isinstance(body, dict) else None
+    except requests.RequestException as exc:
+        st.error(f"删除项目问答失败: {exc}")
+    return None
+
+
+def remove_project_papers(project_id: str, paper_ids: list[str]) -> dict[str, Any] | None:
+    if not project_id or not paper_ids:
+        return None
+    try:
+        body = show_response(
+            request(
+                "POST",
+                f"/api/projects/{project_id}/papers/delete",
+                json={"paper_ids": paper_ids},
+                timeout=60,
+            ),
+            show_body=False,
+        )
+        return body if isinstance(body, dict) else None
+    except requests.RequestException as exc:
+        st.error(f"从项目移除文献失败: {exc}")
+    return None
+
+
+def render_project_content_manager() -> None:
+    st.divider()
+    st.subheader("项目内容")
+    project_id = render_searchable_project_selector(prefix="project_content")
+    if not project_id:
+        return
+
+    col_papers, col_qas = st.columns(2)
+    if col_papers.button("查看项目文献", use_container_width=True):
+        st.session_state["project_content_papers"] = fetch_project_papers(project_id)
+        st.session_state["project_content_project_id"] = project_id
+    if col_qas.button("查看历史问答", use_container_width=True):
+        st.session_state["project_content_qas"] = fetch_project_qas(project_id)
+        st.session_state["project_content_project_id"] = project_id
+
+    if st.session_state.get("project_content_project_id") != project_id:
+        st.session_state["project_content_papers"] = []
+        st.session_state["project_content_qas"] = []
+
+    papers = st.session_state.get("project_content_papers", [])
+    if papers:
+        st.markdown("### 已收录文献")
+        rows = []
+        for paper in papers:
+            rows.append(
+                {
+                    "标题": paper.get("title", ""),
+                    "来源": paper.get("source", ""),
+                    "来源 ID": paper.get("source_id", ""),
+                    "DOI": paper.get("doi", ""),
+                    "发表日期": paper.get("published_date", ""),
+                    "文献 ID": paper.get("id", ""),
+                }
+            )
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    if papers:
+        st.markdown("### 移除项目文献")
+        paper_remove_rows = []
+        for index, paper in enumerate(papers):
+            paper_remove_rows.append(
+                {
+                    "选择": False,
+                    "序号": index,
+                    "标题": paper.get("title", ""),
+                    "来源": paper.get("source", ""),
+                    "DOI": paper.get("doi", ""),
+                    "文献 ID": paper.get("id", ""),
+                }
+            )
+        edited_paper_remove_rows = st.data_editor(
+            paper_remove_rows,
+            use_container_width=True,
+            hide_index=True,
+            disabled=["序号", "标题", "来源", "DOI", "文献 ID"],
+            column_config={
+                "选择": st.column_config.CheckboxColumn("选择"),
+                "标题": st.column_config.TextColumn("标题", width="large"),
+                "DOI": st.column_config.TextColumn("DOI"),
+                "文献 ID": st.column_config.TextColumn("文献 ID"),
+            },
+            key="project_content_remove_papers_editor",
+        )
+        selected_paper_ids = [papers[row["序号"]]["id"] for row in edited_paper_remove_rows if row.get("选择")]
+        st.caption(f"已选择 {len(selected_paper_ids)} 篇文献")
+        with st.expander("从当前项目移除文献", expanded=bool(selected_paper_ids)):
+            st.warning("该操作只会解除文献与当前项目的绑定，不会删除文献库中的原始文献和向量。")
+            confirm_remove_papers = st.checkbox("确认从当前项目移除选中文献", key="project_content_confirm_remove_papers")
+            if st.button(
+                "批量移除选中文献",
+                disabled=not confirm_remove_papers or not selected_paper_ids,
+                use_container_width=True,
+            ):
+                result = remove_project_papers(project_id, selected_paper_ids)
+                if result:
+                    st.success(f"已从项目移除 {result.get('removed', 0)} 篇文献")
+                    st.session_state["project_content_papers"] = fetch_project_papers(project_id)
+                    st.rerun()
+
+    qas = st.session_state.get("project_content_qas", [])
+    if qas:
+        st.markdown("### 历史问答")
+        qa_rows = []
+        for index, qa in enumerate(qas):
+            qa_rows.append(
+                {
+                    "选择": False,
+                    "序号": index,
+                    "问题": qa.get("question", ""),
+                    "回答": qa.get("answer", ""),
+                    "纳入总结": bool(qa.get("include_in_summary_context", True)),
+                    "判定原因": qa.get("summary_context_reason") or "",
+                    "创建时间": qa.get("created_at", ""),
+                    "问答 ID": qa.get("id", ""),
+                }
+            )
+        edited_rows = st.data_editor(
+            qa_rows,
+            use_container_width=True,
+            hide_index=True,
+            disabled=["序号", "问题", "回答", "纳入总结", "判定原因", "创建时间", "问答 ID"],
+            column_config={
+                "选择": st.column_config.CheckboxColumn("选择"),
+                "问题": st.column_config.TextColumn("问题", width="large"),
+                "回答": st.column_config.TextColumn("AI 回答", width="large"),
+                "纳入总结": st.column_config.CheckboxColumn("纳入总结"),
+                "问答 ID": st.column_config.TextColumn("问答 ID"),
+            },
+            key="project_content_qas_editor",
+        )
+        selected_qa_ids = [qas[row["序号"]]["id"] for row in edited_rows if row.get("选择")]
+        st.caption(f"已选择 {len(selected_qa_ids)} 条问答")
+
+        col_delete_one, col_delete_many = st.columns(2)
+        confirm_delete_qas = st.checkbox("确认删除选中的历史问答", key="project_content_confirm_delete_qas")
+        if col_delete_one.button(
+            "删除第一条选中问答",
+            disabled=not confirm_delete_qas or len(selected_qa_ids) != 1,
+            use_container_width=True,
+        ):
+            result = delete_project_qa(project_id, selected_qa_ids[0])
+            if result:
+                st.success(f"已删除 {result.get('deleted', 0)} 条问答")
+                st.session_state["project_content_qas"] = fetch_project_qas(project_id)
+                st.rerun()
+        if col_delete_many.button(
+            "批量删除选中问答",
+            disabled=not confirm_delete_qas or not selected_qa_ids,
+            use_container_width=True,
+        ):
+            result = delete_project_qas(project_id, selected_qa_ids)
+            if result:
+                st.success(f"已删除 {result.get('deleted', 0)} 条问答")
+                st.session_state["project_content_qas"] = fetch_project_qas(project_id)
+                st.rerun()
 
 
 def render_sidebar() -> None:
@@ -252,7 +656,7 @@ def render_search() -> None:
     year_from = col1.number_input("起始年份", min_value=1900, max_value=2100, value=None, step=1)
     year_to = col2.number_input("结束年份", min_value=1900, max_value=2100, value=None, step=1)
     author = col3.text_input("作者")
-    source = col4.selectbox("来源", ["", "arxiv", "semantic_scholar", "pubmed"])
+    source = col4.selectbox("来源", ["", "pubmed", "arxiv", "semantic_scholar", "user_upload", "manual"])
     col5, col6, col7 = st.columns(3)
     journal = col5.text_input("期刊")
     citation_min = col6.number_input("最低引用数", min_value=0, value=None, step=1)
@@ -342,7 +746,7 @@ def render_search_results(body: dict[str, Any]) -> None:
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
     if external_results:
-        st.markdown("**外部文献源补充结果**")
+        st.markdown("**在线检索补充结果**")
         external_rows = []
         for item in external_results:
             paper = item.get("paper", {})
@@ -363,30 +767,44 @@ def render_search_results(body: dict[str, Any]) -> None:
 
 
 def render_import() -> None:
-    st.subheader("文献导入")
+    st.subheader("文献获取")
+    external_tab, upload_tab, manual_tab = st.tabs(["在线检索", "本地资料上传", "手动录入"])
+
+    with external_tab:
+        render_external_import()
+
+    with upload_tab:
+        render_material_upload()
+
+    with manual_tab:
+        render_manual_material()
+
+
+def render_external_import() -> None:
     query = st.text_input("导入查询", key="import_query")
-    sources = st.multiselect("数据源", ["arxiv", "semantic_scholar", "pubmed"], default=["arxiv"])
+    sources = st.multiselect("数据源", ["pubmed", "arxiv", "semantic_scholar"], default=["pubmed"])
     limit = st.slider("候选数量", 1, 100, 20, key="import_limit")
 
-    if st.button("搜索候选文献", type="primary"):
+    if st.button("搜索文献", type="primary"):
         payload = {"query": query, "sources": sources, "limit": limit, "include_pdf": False}
         try:
             body = show_response(request("POST", "/api/papers/import/preview", json=payload, timeout=90))
             if isinstance(body, dict):
                 st.session_state["import_candidates"] = body.get("candidates", [])
         except requests.RequestException as exc:
-            st.error(f"候选文献搜索失败: {exc}")
+            st.error(f"文献搜索失败: {exc}")
 
     candidates = st.session_state.get("import_candidates", [])
     if not candidates:
         return
 
     st.divider()
-    st.subheader("候选文献筛选")
+    st.subheader("检索结果筛选")
     sort_by = st.selectbox("排序", ["发布时间", "标题", "来源 ID"], key="import_sort_by")
     reverse_sort = st.checkbox("倒序", value=True, key="import_sort_desc")
-    select_all = st.checkbox("全选当前候选文献", key="import_select_all")
-    include_pdf = st.checkbox("导入时尝试解析 PDF 全文", key="import_include_pdf_selected")
+    select_all = st.checkbox("全选当前结果", key="import_select_all")
+    include_pdf = st.checkbox("自动获取全文", key="import_include_pdf_selected")
+    bind_project_id = render_searchable_project_selector(prefix="import_bind", optional=True)
     sorted_candidates = sorted(
         candidates,
         key=lambda paper: {
@@ -399,6 +817,7 @@ def render_import() -> None:
 
     rows = []
     for index, paper in enumerate(sorted_candidates):
+        doi = paper.get("doi")
         authors = ", ".join(
             author_item.get("name", "")
             for author_item in paper.get("authors", [])
@@ -411,7 +830,8 @@ def render_import() -> None:
                 "title": paper.get("title", ""),
                 "authors": authors,
                 "published_date": paper.get("published_date"),
-                "doi": paper.get("doi"),
+                "doi": doi,
+                "doi_url": doi_to_url(doi),
                 "source": paper.get("source"),
                 "source_id": paper.get("source_id"),
                 "abstract": paper.get("abstract", "")[:500],
@@ -422,7 +842,7 @@ def render_import() -> None:
         rows,
         use_container_width=True,
         hide_index=True,
-        disabled=["index", "title", "authors", "published_date", "doi", "source", "source_id", "abstract"],
+        disabled=["index", "title", "authors", "published_date", "doi", "doi_url", "source", "source_id", "abstract"],
         column_config={
             "select": st.column_config.CheckboxColumn("入库"),
             "index": st.column_config.NumberColumn("序号"),
@@ -430,6 +850,7 @@ def render_import() -> None:
             "authors": st.column_config.TextColumn("作者", width="medium"),
             "published_date": st.column_config.TextColumn("发布时间"),
             "doi": st.column_config.TextColumn("DOI"),
+            "doi_url": st.column_config.LinkColumn("DOI链接"),
             "source": st.column_config.TextColumn("来源"),
             "source_id": st.column_config.TextColumn("来源 ID"),
             "abstract": st.column_config.TextColumn("摘要预览", width="large"),
@@ -439,8 +860,8 @@ def render_import() -> None:
     selected = [sorted_candidates[row["index"]] for row in edited_rows if row.get("select")]
     st.caption(f"已选择 {len(selected)} / {len(sorted_candidates)} 篇")
 
-    if st.button("导入勾选文献", disabled=not selected, use_container_width=True):
-        payload = {"papers": selected, "include_pdf": include_pdf}
+    if st.button("导入选中文献", disabled=not selected, use_container_width=True):
+        payload = {"papers": selected, "include_pdf": include_pdf, "project_id": bind_project_id or None}
         try:
             with st.spinner("正在入库；如果勾选了 PDF 全文解析，可能需要数分钟。"):
                 body = show_response(
@@ -457,18 +878,177 @@ def render_import() -> None:
                 with st.expander("原始 JSON"):
                     st.json(body)
         except requests.RequestException as exc:
-            st.error(f"勾选文献入库失败: {exc}")
+            st.error(f"选中文献入库失败: {exc}")
+
+
+def render_material_upload() -> None:
+    st.caption("支持 PDF、DOCX 和 Markdown。未选择项目时，资料会进入个人资料库；未发表资料默认 private。")
+    uploaded_files = st.file_uploader(
+        "选择资料文件",
+        type=["pdf", "docx", "md", "markdown"],
+        accept_multiple_files=True,
+    )
+    uploaded_count = len(uploaded_files) if uploaded_files else 0
+    if uploaded_count:
+        st.caption(f"已选择 {uploaded_count} 个文件")
+
+    project_id = render_project_selector("绑定项目，可选", "upload_project_selector")
+    publication_status = st.selectbox(
+        "发表状态",
+        ["unpublished", "internal", "preprint", "published", "unknown"],
+        key="upload_publication_status",
+    )
+    visibility = st.selectbox("可见性", ["private", "project", "public"], index=0, key="upload_visibility")
+    title = st.text_input(
+        "标题，可选；单文件上传时覆盖自动识别",
+        key="upload_title",
+        disabled=uploaded_count > 1,
+    )
+    abstract = st.text_area(
+        "摘要，可选；单文件上传时覆盖模型生成摘要",
+        key="upload_abstract",
+        disabled=uploaded_count > 1,
+    )
+    if uploaded_count > 1:
+        st.info("批量上传时不会应用标题和摘要覆盖，系统会分别识别每篇资料。")
+    authors_json = st.text_area(
+        "作者 JSON，可选",
+        value="[]",
+        help='例如：[{"name": "Alice"}, {"name": "Bob"}]',
+        key="upload_authors_json",
+    )
+
+    if st.button("上传并入库", type="primary", disabled=not uploaded_files, use_container_width=True):
+        data = {
+            "publication_status": publication_status,
+            "visibility": visibility,
+            "authors_json": authors_json or "[]",
+        }
+        if project_id.strip():
+            data["project_id"] = project_id.strip()
+        if uploaded_count == 1 and title.strip():
+            data["title"] = title.strip()
+        if uploaded_count == 1 and abstract.strip():
+            data["abstract"] = abstract.strip()
+
+        try:
+            with st.spinner("正在保存、解析、分块、向量化并写入知识库。"):
+                if uploaded_count == 1:
+                    uploaded_file = uploaded_files[0]
+                    files = {
+                        "file": (
+                            uploaded_file.name,
+                            uploaded_file.getvalue(),
+                            uploaded_file.type or "application/octet-stream",
+                        )
+                    }
+                    body = show_response(request("POST", "/api/papers/upload", data=data, files=files, timeout=1800))
+                else:
+                    files = [
+                        (
+                            "files",
+                            (
+                                uploaded_file.name,
+                                uploaded_file.getvalue(),
+                                uploaded_file.type or "application/octet-stream",
+                            ),
+                        )
+                        for uploaded_file in uploaded_files
+                    ]
+                    body = show_response(
+                        request("POST", "/api/papers/upload/batch", data=data, files=files, timeout=3600),
+                    )
+            if isinstance(body, dict):
+                if uploaded_count == 1:
+                    st.session_state["last_uploaded_paper_id"] = body.get("paper_id")
+                else:
+                    st.session_state["last_batch_upload_results"] = body.get("results", [])
+                    st.metric("成功入库", body.get("succeeded", 0), help=f"总计 {body.get('total', 0)} 个文件")
+                    if body.get("failed", 0):
+                        st.warning(f"{body.get('failed', 0)} 个文件入库失败，请查看结果表。")
+                    rows = [
+                        {
+                            "文件名": item.get("filename", ""),
+                            "结果": "成功" if item.get("ok") else "失败",
+                            "文献 ID": item.get("paper_id") or "",
+                            "状态": item.get("status", ""),
+                            "说明": item.get("message", ""),
+                        }
+                        for item in body.get("results", [])
+                    ]
+                    if rows:
+                        st.dataframe(rows, use_container_width=True, hide_index=True)
+                    with st.expander("原始 JSON"):
+                        st.json(body)
+        except requests.RequestException as exc:
+            st.error(f"上传资料失败: {exc}")
+
+
+def render_manual_material() -> None:
+    st.caption("用于没有文件的内部资料、实验记录或未发表内容。标题和摘要必填。")
+    title = st.text_input("标题", key="manual_title")
+    abstract = st.text_area("摘要", key="manual_abstract")
+    content = st.text_area("正文/笔记，可选；留空则使用摘要作为正文", key="manual_content")
+    project_id = render_project_selector("绑定项目，可选", "manual_project_selector")
+    publication_status = st.selectbox(
+        "发表状态",
+        ["unpublished", "internal", "preprint", "published", "unknown"],
+        key="manual_publication_status",
+    )
+    visibility = st.selectbox("可见性", ["private", "project", "public"], index=0, key="manual_visibility")
+    authors_json = st.text_area(
+        "作者 JSON，可选",
+        value="[]",
+        help='例如：[{"name": "Alice"}]',
+        key="manual_authors_json",
+    )
+
+    if st.button("创建手动记录", type="primary", use_container_width=True):
+        try:
+            authors = json.loads(authors_json or "[]")
+        except ValueError:
+            st.error("作者 JSON 格式不正确")
+            return
+        payload = {
+            "title": title,
+            "abstract": abstract,
+            "content": content or None,
+            "authors": authors,
+            "project_id": project_id.strip() or None,
+            "publication_status": publication_status,
+            "visibility": visibility,
+            "metadata": {},
+        }
+        try:
+            with st.spinner("正在创建资料并写入向量库。"):
+                show_response(request("POST", "/api/papers/manual", json=payload, timeout=900))
+        except requests.RequestException as exc:
+            st.error(f"创建手动记录失败: {exc}")
 
 
 def render_projects() -> None:
     st.subheader("研究项目")
+    with st.expander("创建项目时绑定文献", expanded=False):
+        create_bind_papers = search_database_papers("create_project_bind")
+        create_bind_paper_ids = render_paper_selection_table(create_bind_papers, "create_project_bind_editor")
+        st.caption(f"已选择 {len(create_bind_paper_ids)} 篇文献用于新项目")
+
     with st.form("create_project"):
         name = st.text_input("项目名称")
         description = st.text_area("项目描述")
         submitted = st.form_submit_button("创建项目")
     if submitted:
         try:
-            show_response(request("POST", "/api/projects", json={"name": name, "description": description or None}))
+            body = show_response(request("POST", "/api/projects", json={"name": name, "description": description or None}))
+            if isinstance(body, dict):
+                fetch_projects()
+                if create_bind_paper_ids:
+                    bind_result = bind_papers_to_project(body.get("id", ""), create_bind_paper_ids)
+                    if bind_result:
+                        st.success(
+                            f"已为新项目绑定 {bind_result.get('added', 0)} 篇文献，"
+                            f"{bind_result.get('already_linked', 0)} 篇已存在。"
+                        )
         except requests.RequestException as exc:
             st.error(f"创建项目失败: {exc}")
 
@@ -483,59 +1063,147 @@ def render_projects() -> None:
                 st.error(f"获取项目失败: {exc}")
 
     with col2:
-        project_id = st.text_input("项目 ID", key="summary_project_id")
-        if st.button("项目批量总结", use_container_width=True):
-            try:
-                show_response(request("POST", f"/api/projects/{project_id}/summary"))
-            except requests.RequestException as exc:
-                st.error(f"项目总结失败: {exc}")
+        st.caption("管理已有研究项目")
 
     projects = st.session_state.get("projects", [])
     if projects:
         st.dataframe(projects, use_container_width=True)
 
+    render_project_content_manager()
+
+def render_project_summary_response(body: dict[str, Any]) -> None:
+    markdown = str(body.get("markdown") or "").strip()
+    st.markdown("### 阶段总结")
+    st.caption(
+        f"项目：{body.get('project_name', '')} | "
+        f"文献数：{body.get('paper_count', 0)} | "
+        f"问答记录数：{body.get('qa_count', 0)}"
+    )
+    if markdown:
+        st.markdown(markdown)
+    else:
+        st.info("本次没有生成可展示的项目总结。")
+
+    with st.expander("调试信息"):
+        st.json(body)
+
+
+def render_project_summary() -> None:
+    st.subheader("阶段总结")
+    project_id = render_searchable_project_selector(prefix="summary")
+    if st.button("生成阶段总结", type="primary", disabled=not project_id, use_container_width=True):
+        try:
+            with st.spinner("正在基于项目文献和历史问答生成阶段性总结。"):
+                body = show_response(request("POST", f"/api/projects/{project_id}/summary", timeout=1800), show_body=False)
+            if isinstance(body, dict):
+                render_project_summary_response(body)
+        except requests.RequestException as exc:
+            st.error(f"项目总结失败: {exc}")
+
+
+def render_stage_summary() -> None:
+    st.subheader("阶段性总结")
+    project_id = render_searchable_project_selector(prefix="summary")
+    summary_question = st.text_area(
+        "本阶段总结问题",
+        placeholder="例如：请总结当前项目已经形成的研究思路、可采用的方法、关键证据和下一步推进方向。",
+        key="summary_question",
+    )
+    if st.button(
+        "生成阶段性总结",
+        type="primary",
+        disabled=not project_id or not summary_question.strip(),
+        use_container_width=True,
+    ):
+        try:
+            with st.spinner("正在基于项目文献和高价值历史问答生成阶段性总结..."):
+                body = show_response(
+                    request(
+                        "POST",
+                        f"/api/projects/{project_id}/summary",
+                        json={"question": summary_question.strip()},
+                        timeout=1800,
+                    ),
+                    show_body=False,
+                )
+            if isinstance(body, dict):
+                render_project_summary_response(body)
+        except requests.RequestException as exc:
+            st.error(f"项目总结失败: {exc}")
+
+
+def render_qa_response(body: dict[str, Any]) -> None:
+    answer = str(body.get("answer") or "").strip()
+    citations = body.get("citations") or []
+
+    st.divider()
+    st.markdown("### 回答")
+    if answer:
+        st.markdown(answer)
+    else:
+        st.info("本次没有生成可展示的回答。")
+
+    if citations:
+        st.markdown("### 引用来源")
+        rows = []
+        for index, citation in enumerate(citations, start=1):
+            rows.append(
+                {
+                    "序号": index,
+                    "文献标题": citation.get("title", ""),
+                    "位置": citation.get("locator") or "",
+                    "文献 ID": citation.get("paper_id", ""),
+                    "片段 ID": citation.get("chunk_id") or "",
+                }
+            )
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    with st.expander("调试信息"):
+        st.json(body)
+
 
 def render_qa() -> None:
-    st.subheader("RAG 文献问答")
-    question = st.text_area("问题", placeholder="例如：这些论文的主要方法差异是什么？")
-    scope = st.selectbox("问答范围", ["paper", "project", "search_results"])
-    paper_id = st.text_input("单篇文献 ID")
-    project_id = st.text_input("项目 ID")
-    paper_ids_text = st.text_area("多个文献 ID，每行一个")
-    session_id = st.text_input("会话 ID，可留空")
+    st.subheader("研究问答")
+    project_id = render_searchable_project_selector(prefix="qa")
+    question = st.text_area("问题", placeholder="例如：这个项目中的文献主要讨论了哪些研究方向？")
 
-    if st.button("提交问题", type="primary"):
-        paper_ids = [line.strip() for line in paper_ids_text.splitlines() if line.strip()]
+    if st.button("提交问题", type="primary", disabled=not project_id or not question.strip()):
         payload = {
             "question": question,
-            "scope": scope,
-            "paper_id": paper_id or None,
-            "project_id": project_id or None,
-            "paper_ids": paper_ids,
-            "session_id": session_id or None,
+            "scope": "project",
+            "project_id": project_id,
+            "paper_id": None,
+            "paper_ids": [],
+            "session_id": None,
         }
         try:
-            show_response(request("POST", "/api/qa", json=payload))
+            body = show_response(request("POST", "/api/qa", json=payload), show_body=False)
+            if isinstance(body, dict):
+                render_qa_response(body)
         except requests.RequestException as exc:
             st.error(f"问答请求失败: {exc}")
 
 
+    st.divider()
+    render_stage_summary()
+
+
 def render_papers() -> None:
-    st.subheader("数据库文献")
-    with st.expander("检索已入库文献", expanded=True):
+    st.subheader("我的文献库")
+    with st.expander("检索我的文献", expanded=True):
         q = st.text_input("综合关键词", placeholder="标题、摘要、DOI、作者、来源 ID", key="paper_catalog_q")
         col_a, col_b, col_c = st.columns(3)
         title = col_a.text_input("标题包含", key="paper_catalog_title")
         doi = col_b.text_input("DOI 包含", key="paper_catalog_doi")
         author = col_c.text_input("作者包含", key="paper_catalog_author")
         col_d, col_e, col_f, col_g = st.columns(4)
-        source = col_d.selectbox("来源", ["", "arxiv", "semantic_scholar", "pubmed"], key="paper_catalog_source")
+        source = col_d.selectbox("来源", ["", "pubmed", "arxiv", "semantic_scholar", "user_upload", "manual"], key="paper_catalog_source")
         source_id = col_e.text_input("来源 ID", key="paper_catalog_source_id")
         year_from = col_f.text_input("起始年份", key="paper_catalog_year_from")
         year_to = col_g.text_input("结束年份", key="paper_catalog_year_to")
         limit = st.slider("查询数量", 1, 100, 20, key="paper_catalog_limit")
 
-        if st.button("查询数据库文献", type="primary"):
+        if st.button("检索文献", type="primary"):
             params: dict[str, Any] = {"limit": limit, "offset": 0}
             for key, value in {
                 "q": q,
@@ -557,32 +1225,56 @@ def render_papers() -> None:
                 if isinstance(body, dict):
                     st.session_state["paper_catalog_results"] = body.get("results", [])
             except requests.RequestException as exc:
-                st.error(f"查询文献失败: {exc}")
+                st.error(f"检索文献失败: {exc}")
 
         results = st.session_state.get("paper_catalog_results", [])
         if results:
-            rows = []
-            for paper in results:
-                authors = ", ".join(
-                    author_item.get("name", "")
-                    for author_item in paper.get("authors", [])
-                    if isinstance(author_item, dict)
-                )
-                rows.append(
-                    {
-                        "system_id": paper.get("id"),
-                        "title": paper.get("title"),
-                        "doi": paper.get("doi"),
-                        "authors": authors,
-                        "source": paper.get("source"),
-                        "source_id": paper.get("source_id"),
-                        "published_date": paper.get("published_date"),
-                    }
-                )
-            st.dataframe(rows, use_container_width=True)
+            selected_paper_ids = render_paper_selection_table(results, "paper_catalog_bind_editor")
+            st.caption(f"已选择 {len(selected_paper_ids)} 篇文献")
 
-    st.subheader("文献详情、总结与删除")
-    paper_id = st.text_input("系统文献 ID", help="先在上方检索数据库文献，再复制 system_id。DOI 保存在 papers.doi 中，不作为当前接口路径参数。", key="paper_detail_id")
+            with st.expander("加入研究项目", expanded=bool(selected_paper_ids)):
+                target_project_id = render_searchable_project_selector(prefix="paper_bind")
+                if st.button(
+                    "将所选文献加入研究项目",
+                    type="primary",
+                    disabled=not target_project_id or not selected_paper_ids,
+                    use_container_width=True,
+                ):
+                    bind_result = bind_papers_to_project(target_project_id, selected_paper_ids)
+                    if bind_result:
+                        st.success(
+                            f"新增绑定 {bind_result.get('added', 0)} 篇，"
+                            f"{bind_result.get('already_linked', 0)} 篇已在项目中，"
+                            f"{bind_result.get('skipped_inaccessible', 0)} 篇不可访问或不存在。"
+                        )
+
+            with st.expander("删除所选文献", expanded=False):
+                st.warning("删除会清理数据库中文献资料、项目关联和 Milvus 向量。该操作不可撤销。")
+                confirm_batch_delete = st.checkbox("确认删除已勾选的文献", key="paper_catalog_delete_confirm")
+                delete_selected_disabled = (
+                    not st.session_state.access_token
+                    or not selected_paper_ids
+                    or not confirm_batch_delete
+                )
+                if st.button(
+                    "删除已勾选文献",
+                    type="primary",
+                    disabled=delete_selected_disabled,
+                    use_container_width=True,
+                ):
+                    deleted_count, failures = delete_selected_papers(selected_paper_ids)
+                    if deleted_count:
+                        st.success(f"已删除 {deleted_count} 篇文献。")
+                        deleted_ids = set(selected_paper_ids)
+                        st.session_state["paper_catalog_results"] = [
+                            paper for paper in results if str(paper.get("id", "")) not in deleted_ids
+                        ]
+                    if failures:
+                        st.error(f"{len(failures)} 篇文献删除失败。")
+                        st.dataframe(failures, use_container_width=True, hide_index=True)
+
+    st.subheader("文献详情")
+    paper_id = st.text_input("系统文献 ID", help="先在上方检索我的文献，再复制 system_id。DOI 保存在 papers.doi 中，不作为当前接口路径参数。", key="paper_detail_id")
     col1, col2 = st.columns(2)
     if col1.button("获取详情", use_container_width=True):
         try:
@@ -609,13 +1301,13 @@ def render_papers() -> None:
 
 
 def render_tasks() -> None:
-    st.subheader("任务状态")
-    task_id = st.text_input("任务 ID")
-    if st.button("查询任务"):
+    st.subheader("处理进度")
+    task_id = st.text_input("处理 ID")
+    if st.button("查询进度"):
         try:
             show_response(request("GET", f"/api/tasks/{task_id}"))
         except requests.RequestException as exc:
-            st.error(f"任务查询失败: {exc}")
+            st.error(f"进度查询失败: {exc}")
 
 
 def main() -> None:
@@ -626,18 +1318,16 @@ def main() -> None:
     st.title("LitSage 文献智能搜索与总结系统")
     st.caption("Streamlit 前端控制台，用于调试和演示 FastAPI Agent 后端能力。")
 
-    tabs = st.tabs(["搜索", "导入", "项目", "问答", "文献", "任务"])
+    tabs = st.tabs(["文献获取", "研究项目", "研究问答", "我的文献库", "处理进度"])
     with tabs[0]:
-        render_search()
-    with tabs[1]:
         render_import()
-    with tabs[2]:
+    with tabs[1]:
         render_projects()
-    with tabs[3]:
+    with tabs[2]:
         render_qa()
-    with tabs[4]:
+    with tabs[3]:
         render_papers()
-    with tabs[5]:
+    with tabs[4]:
         render_tasks()
 
 

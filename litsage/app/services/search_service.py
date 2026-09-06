@@ -34,7 +34,7 @@ class SearchFilters:
     journal: str | None = None
     citation_min: int | None = None
     citation_max: int | None = None
-    external_sources: tuple[LiteratureSource, ...] = (LiteratureSource.arxiv, LiteratureSource.pubmed)
+    external_sources: tuple[LiteratureSource, ...] = (LiteratureSource.pubmed, LiteratureSource.arxiv)
 
 
 class SearchService:

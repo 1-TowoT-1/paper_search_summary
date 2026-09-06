@@ -10,6 +10,10 @@ python-jose[cryptography]==3.5.0
 email-validator==2.2.0
 httpx==0.28.1
 pymupdf==1.26.3
+pillow
+pytesseract
+python-docx
+python-multipart
 streamlit
 requests==2.32.4
 pymilvus

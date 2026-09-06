@@ -4,7 +4,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.models.db import Paper, Project, ProjectPaper
+from app.models.db import Paper, PaperChunk, PaperFile, Project, ProjectPaper
 from app.models.schemas import PaperDeleteResponse
 from app.services.vector_store import VectorStore, VectorStoreError
 
@@ -46,6 +46,8 @@ class PaperCleanupService:
             .filter(ProjectPaper.paper_id == paper_id)
             .delete(synchronize_session=False)
         )
+        db.query(PaperChunk).filter(PaperChunk.paper_id == paper_id).delete(synchronize_session=False)
+        db.query(PaperFile).filter(PaperFile.paper_id == paper_id).delete(synchronize_session=False)
         db.delete(paper)
 
         try:
@@ -64,6 +66,10 @@ class PaperCleanupService:
         )
 
     def _ensure_user_can_delete(self, db: Session, paper_id: UUID, user_id: UUID) -> None:
+        paper = db.get(Paper, paper_id)
+        if paper and paper.owner_user_id == user_id:
+            return
+
         linked_user_ids = [
             row[0]
             for row in (

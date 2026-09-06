@@ -66,6 +66,18 @@ class PaperRead(BaseModel):
     pdf_url: str | None = None
     citation_count: int = 0
     metadata_json: dict = {}
+    source_type: str = "external"
+    publication_status: str = "published"
+    visibility: str = "public"
+    owner_user_id: UUID | None = None
+    original_filename: str | None = None
+    file_path: str | None = None
+    file_mime_type: str | None = None
+    file_sha256: str | None = None
+    ingestion_status: str = "completed"
+    analysis_status: str = "pending"
+    metadata_confidence: str = "high"
+    text_extraction_method: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -115,9 +127,23 @@ class LiteratureSource(str, Enum):
     pubmed = "pubmed"
 
 
+class PublicationStatus(str, Enum):
+    published = "published"
+    preprint = "preprint"
+    unpublished = "unpublished"
+    internal = "internal"
+    unknown = "unknown"
+
+
+class Visibility(str, Enum):
+    private = "private"
+    project = "project"
+    public = "public"
+
+
 class ImportPapersRequest(BaseModel):
     query: str = Field(min_length=2)
-    sources: list[LiteratureSource] = Field(default_factory=lambda: [LiteratureSource.arxiv])
+    sources: list[LiteratureSource] = Field(default_factory=lambda: [LiteratureSource.pubmed])
     limit: int = Field(default=20, ge=1, le=100)
     include_pdf: bool = False
 
@@ -152,6 +178,7 @@ class ImportPreviewResponse(BaseModel):
 class ImportSelectedPapersRequest(BaseModel):
     papers: list[ImportCandidatePaper] = Field(min_length=1, max_length=100)
     include_pdf: bool = False
+    project_id: UUID | None = None
 
 
 class ImportPapersResponse(BaseModel):
@@ -159,6 +186,43 @@ class ImportPapersResponse(BaseModel):
     status: str
     message: str
     stats: dict[str, int | list[str]] | None = None
+
+
+class UploadMaterialResponse(BaseModel):
+    paper_id: UUID
+    status: str
+    message: str
+    stats: dict[str, int | str | list[str]] = Field(default_factory=dict)
+
+
+class UploadMaterialItemResult(BaseModel):
+    filename: str
+    ok: bool
+    paper_id: UUID | None = None
+    status: str
+    message: str
+    stats: dict[str, int | str | list[str]] = Field(default_factory=dict)
+    error: str | None = None
+
+
+class BatchUploadMaterialResponse(BaseModel):
+    status: str
+    message: str
+    total: int
+    succeeded: int
+    failed: int
+    results: list[UploadMaterialItemResult]
+
+
+class ManualMaterialRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    abstract: str = Field(min_length=20)
+    content: str | None = None
+    authors: list[dict] = []
+    project_id: UUID | None = None
+    publication_status: PublicationStatus = PublicationStatus.unpublished
+    visibility: Visibility = Visibility.private
+    metadata: dict = {}
 
 
 class SummaryResponse(BaseModel):
@@ -186,9 +250,81 @@ class AddProjectPaperRequest(BaseModel):
     paper_id: UUID
 
 
+class AddProjectPapersRequest(BaseModel):
+    paper_ids: list[UUID] = Field(min_length=1, max_length=200)
+
+
+class AddProjectPapersResponse(BaseModel):
+    project_id: UUID
+    requested: int
+    added: int
+    already_linked: int
+    skipped_inaccessible: int
+
+
+class RemoveProjectPapersRequest(BaseModel):
+    paper_ids: list[UUID] = Field(min_length=1, max_length=200)
+
+
+class RemoveProjectPapersResponse(BaseModel):
+    project_id: UUID
+    requested: int
+    removed: int
+    skipped: int
+
+
+class ProjectPapersResponse(BaseModel):
+    project_id: UUID
+    total: int
+    results: list[PaperRead]
+
+
+class ProjectQARead(BaseModel):
+    id: UUID
+    project_id: UUID
+    user_id: UUID
+    question: str
+    answer: str
+    citations: list[dict] = []
+    include_in_summary_context: bool = True
+    summary_context_reason: str | None = None
+    created_at: datetime
+
+
+class ProjectQAListResponse(BaseModel):
+    project_id: UUID
+    total: int
+    results: list[ProjectQARead]
+
+
+class DeleteProjectQAsRequest(BaseModel):
+    qa_ids: list[UUID] = Field(min_length=1, max_length=200)
+
+
+class DeleteProjectQAsResponse(BaseModel):
+    project_id: UUID
+    requested: int
+    deleted: int
+    skipped: int
+
+
 class SummaryTaskResponse(BaseModel):
     task_id: UUID
     status: str
+
+
+class ProjectSummaryRequest(BaseModel):
+    question: str | None = Field(default=None, max_length=2000)
+
+
+class ProjectSummaryResponse(BaseModel):
+    project_id: UUID
+    project_name: str
+    markdown: str
+    paper_count: int
+    qa_count: int
+    summary_question: str | None = None
+    cached: bool = False
 
 
 class QAScope(str, Enum):

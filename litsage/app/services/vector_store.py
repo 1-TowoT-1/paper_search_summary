@@ -61,6 +61,12 @@ class VectorStore:
                     "source": str(metadata.get("source") or "")[:64],
                     "source_id": str(metadata.get("source_id") or "")[:128],
                     "locator": str(metadata.get("locator") or "")[:128],
+                    "user_id": str(metadata.get("user_id") or "")[:64],
+                    "project_id": str(metadata.get("project_id") or "")[:64],
+                    "source_type": str(metadata.get("source_type") or "")[:64],
+                    "publication_status": str(metadata.get("publication_status") or "")[:64],
+                    "visibility": str(metadata.get("visibility") or "")[:64],
+                    "chunk_type": str(metadata.get("chunk_type") or "")[:64],
                 }
             ],
         )
@@ -87,7 +93,7 @@ class VectorStore:
             data=[vector],
             limit=limit,
             filter=filter_expr,
-            output_fields=["paper_id", "text", "locator"],
+            output_fields=["paper_id", "text", "title", "locator"],
         )
         return self._to_hits(results)
 

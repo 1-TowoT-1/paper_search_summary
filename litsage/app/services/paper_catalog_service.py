@@ -9,6 +9,7 @@ from app.models.db import Paper
 @dataclass
 class PaperCatalogFilters:
     q: str | None = None
+    q_terms: list[str] | None = None
     title: str | None = None
     doi: str | None = None
     author: str | None = None
@@ -29,14 +30,20 @@ class PaperCatalogService:
         query = db.query(Paper)
 
         if filters.q:
-            value = self._like(filters.q)
+            terms = self._query_terms(filters.q, filters.q_terms)
             query = query.filter(
                 or_(
-                    Paper.title.ilike(value),
-                    Paper.abstract.ilike(value),
-                    Paper.doi.ilike(value),
-                    Paper.source_id.ilike(value),
-                    cast(Paper.authors, String).ilike(value),
+                    *[
+                        field.ilike(self._like(term))
+                        for term in terms
+                        for field in (
+                            Paper.title,
+                            Paper.abstract,
+                            Paper.doi,
+                            Paper.source_id,
+                            cast(Paper.authors, String),
+                        )
+                    ]
                 )
             )
         if filters.title:
@@ -65,3 +72,15 @@ class PaperCatalogService:
 
     def _like(self, value: str) -> str:
         return f"%{value.strip()}%"
+
+    def _query_terms(self, q: str, q_terms: list[str] | None) -> list[str]:
+        terms = [q, *(q_terms or [])]
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for term in terms:
+            value = " ".join(str(term or "").strip().split())
+            key = value.lower()
+            if value and key not in seen:
+                seen.add(key)
+                normalized.append(value)
+        return normalized

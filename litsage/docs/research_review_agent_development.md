@@ -151,7 +151,7 @@ Related Work
 目标：
 
 ```text
-从 arXiv / Semantic Scholar / PubMed 等来源获取文献，并统一入库。
+从 arXiv / Semantic Scholar / PubMed 等公开来源获取文献，同时支持用户上传私有、内部或未发表资料，并统一纳入项目知识库。
 ```
 
 第一版：
@@ -162,6 +162,17 @@ Semantic Scholar / PubMed 预留接口
 无摘要不入库
 BGE-M3 embedding 失败不入库
 Milvus 写入成功后再提交 PostgreSQL
+```
+
+新增用户资料入库原则：
+
+```text
+外部公开文献：无摘要则跳过
+用户上传 PDF / DOCX / Markdown：允许无摘要，但必须成功解析正文，或通过 OCR/多模态兜底提取可信文本，并生成 ingestion_abstract 后入库
+用户仅手动创建资料：必须提供标题和摘要
+用户上传资料可不绑定项目，未绑定时进入个人资料库
+未发表资料：source 标记为 user_upload，publication_status 标记为 unpublished/internal/unknown，visibility 默认 private
+允许用户手动输入 title / abstract 覆盖模型识别结果
 ```
 
 后续增强：
@@ -332,6 +343,25 @@ paper_chunks (
 )
 ```
 
+### 5.1.1 paper_files
+
+保存用户上传文件信息。
+
+```sql
+paper_files (
+    id UUID PRIMARY KEY,
+    paper_id UUID REFERENCES papers(id),
+    user_id UUID REFERENCES users(id),
+    original_filename TEXT,
+    stored_path TEXT,
+    mime_type VARCHAR,
+    file_size_bytes BIGINT,
+    sha256 VARCHAR UNIQUE,
+    upload_status VARCHAR,
+    created_at TIMESTAMP
+)
+```
+
 ### 5.2 paper_insights
 
 保存单篇论文结构化理解结果。
@@ -432,6 +462,20 @@ qa_messages (
 ```text
 POST /api/papers/{id}/analyze
 GET  /api/papers/{id}/insight
+```
+
+### 6.1.1 用户资料入库
+
+```text
+POST /api/papers/upload
+POST /api/papers/manual
+```
+
+其中：
+
+```text
+/upload 用于用户上传 PDF 等文件
+/manual 用于用户手动录入未发表资料、实验记录或内部文档摘要
 ```
 
 ### 6.2 图表理解
@@ -659,6 +703,7 @@ project_id
 需要新增：
 
 ```text
+PaperFile
 PaperChunk
 PaperInsight
 PaperFigure
@@ -670,6 +715,15 @@ QAMessage
 同时建议给 `papers` 表补充：
 
 ```text
+source_type
+publication_status
+visibility
+owner_user_id
+original_filename
+file_path
+file_mime_type
+file_sha256
+text_extraction_method
 venue
 publication_type
 code_url
@@ -707,6 +761,12 @@ PaperRead
 需要继续增强：
 
 ```text
+用户上传 PDF 入库
+用户上传 DOCX 入库
+用户上传 Markdown 入库
+手动资料入库
+本地文件 sha256 去重
+解析失败时 OCR/多模态兜底接口
 跨源去重
 Semantic Scholar 导入
 PubMed 导入
@@ -899,4 +959,3 @@ API 设计文档
 再做理解和对比
 最后做综述生成
 ```
-

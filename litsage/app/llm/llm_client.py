@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
@@ -68,6 +69,122 @@ class LLMClient:
             logger.exception("LLM paper summary failed")
             return f"LLM 调用失败，暂时无法生成总结。\n\n错误信息：{exc}"
 
+    async def generate_ingestion_abstract(self, text: str) -> str:
+        system_prompt = (
+            "你是科研资料入库助手。请为用户上传的资料生成一个客观、准确、适合语义检索的中文摘要。"
+            "只能依据输入文本，不要编造作者、结果或结论。"
+        )
+        user_prompt = (
+            "请生成 200-300 字中文摘要，覆盖研究主题、方法、内容范围和主要信息。"
+            "如果资料不是论文，也按科研资料进行概括。\n\n"
+            f"资料内容：\n{self._clip(text, 12000)}"
+        )
+        try:
+            return await self._generate(system_prompt=system_prompt, user_prompt=user_prompt, max_output_tokens=700)
+        except Exception as exc:
+            logger.exception("LLM ingestion abstract failed")
+            raise LLMClientError(f"Failed to generate ingestion abstract: {exc}") from exc
+
+    async def extract_text_from_images(self, images: list[bytes], filename: str = "document.pdf") -> str:
+        if not images:
+            return ""
+        self._validate_vision_model()
+        logger.info(
+            "multimodal extraction request filename=%s images=%s image_bytes=%s",
+            filename,
+            len(images),
+            [len(image) for image in images],
+        )
+        if self.provider == "ollama":
+            raise LLMClientError("Ollama multimodal extraction is not implemented")
+
+        if self.provider not in {"openai", "openai_compatible", "compatible", "deepseek"}:
+            raise LLMClientError(f"Multimodal extraction is not supported for provider: {self.provider}")
+
+        mode = self._api_mode()
+        if mode in {"chat", "chat_completions", "chat-completions"}:
+            text = await self._extract_text_from_images_chat(images=images, filename=filename)
+        else:
+            text = await self._extract_text_from_images_responses(images=images, filename=filename)
+        return self._validate_multimodal_text(text)
+
+    async def extract_text_from_image_urls(self, image_urls: list[str], filename: str = "document.pdf") -> str:
+        image_urls = [url.strip() for url in image_urls if url and url.strip()]
+        if not image_urls:
+            return ""
+        self._validate_vision_model()
+        logger.info(
+            "multimodal extraction request filename=%s image_urls=%s",
+            filename,
+            len(image_urls),
+        )
+        if self.provider == "ollama":
+            raise LLMClientError("Ollama multimodal extraction is not implemented")
+
+        if self.provider not in {"openai", "openai_compatible", "compatible", "deepseek"}:
+            raise LLMClientError(f"Multimodal extraction is not supported for provider: {self.provider}")
+
+        mode = self._api_mode()
+        if mode in {"chat", "chat_completions", "chat-completions"}:
+            text = await self._extract_text_from_image_urls_chat(image_urls=image_urls, filename=filename)
+        else:
+            text = await self._extract_text_from_image_urls_responses(image_urls=image_urls, filename=filename)
+        return self._validate_multimodal_text(text)
+
+    async def extract_metadata_from_images(self, images: list[bytes], filename: str = "document.pdf") -> dict[str, Any]:
+        if not images:
+            return {}
+        prompt = (
+            f"请从用户上传资料 {filename} 的页面图片中识别文献元数据。"
+            "只基于图片中可见内容，不要编造。"
+            "返回 JSON，字段为："
+            '{"title": "标题或空字符串", "abstract": "摘要原文或中文概括", '
+            '"authors": [{"name": "作者名"}], "keywords": ["关键词"], '
+            '"language": "语言", "confidence": "high|medium|low"}。'
+            "如果图片中有 Abstract、摘要、Rezumat 等摘要段落，优先提取该段落；"
+            "如果没有明确摘要，但能看懂首页主要内容，可以生成客观中文摘要。"
+        )
+        text = await self._generate_from_images(
+            images=images,
+            filename=filename,
+            system_prompt="你是严谨的科研 PDF 首页元数据识别助手，只返回 JSON。",
+            user_prompt=prompt,
+            max_output_tokens=1000,
+        )
+        text = self._validate_multimodal_text(text)
+        try:
+            parsed = self._parse_json_object(text)
+        except Exception as exc:
+            raise LLMClientError(f"Failed to parse multimodal metadata JSON: {text[:500]}") from exc
+        return parsed
+
+    async def extract_metadata_from_image_urls(self, image_urls: list[str], filename: str = "document.pdf") -> dict[str, Any]:
+        if not image_urls:
+            return {}
+        prompt = (
+            f"请从用户上传资料 {filename} 的页面图片中识别文献元数据。"
+            "只基于图片中可见内容，不要编造。"
+            "返回 JSON，字段为："
+            '{"title": "标题或空字符串", "abstract": "摘要原文或中文概括", '
+            '"authors": [{"name": "作者名"}], "keywords": ["关键词"], '
+            '"language": "语言", "confidence": "high|medium|low"}。'
+            "如果图片中有 Abstract、摘要、Rezumat 等摘要段落，优先提取该段落；"
+            "如果没有明确摘要，但能看懂首页主要内容，可以生成客观中文摘要。"
+        )
+        text = await self._generate_from_image_urls(
+            image_urls=image_urls,
+            filename=filename,
+            system_prompt="你是严谨的科研 PDF 首页元数据识别助手，只返回 JSON。",
+            user_prompt=prompt,
+            max_output_tokens=1000,
+        )
+        text = self._validate_multimodal_text(text)
+        try:
+            parsed = self._parse_json_object(text)
+        except Exception as exc:
+            raise LLMClientError(f"Failed to parse multimodal metadata JSON: {text[:500]}") from exc
+        return parsed
+
     async def answer(self, question: str, context: str) -> str:
         if not context.strip():
             return "当前检索上下文不足，无法给出可靠回答。请先导入相关文献或缩小问题范围。"
@@ -85,14 +202,34 @@ class LLMClient:
             logger.exception("LLM RAG answer failed")
             return f"LLM 调用失败，暂时无法生成回答。\n\n错误信息：{exc}"
 
+    async def assess_project_qa_summary_context(self, question: str, answer: str) -> dict[str, Any]:
+        system_prompt = (
+            "你是科研项目管理助手。请判断一条项目问答是否适合进入阶段性总结上下文。"
+            "适合进入上下文的问答应当包含研究目标、研究方法、证据、结论、风险、实验设计、项目推进建议或重要待办。"
+            "闲聊、测试、重复确认、无实际研究信息的问题不应进入总结上下文。只返回 JSON。"
+        )
+        user_prompt = (
+            "请返回 JSON：\n"
+            '{"include": true, "reason": "简短原因"}\n\n'
+            f"问题：\n{question}\n\n"
+            f"回答：\n{self._clip(answer, 3000)}"
+        )
+        try:
+            text = await self._generate(system_prompt=system_prompt, user_prompt=user_prompt, max_output_tokens=300)
+            parsed = self._parse_json_object(text)
+            include = bool(parsed.get("include"))
+            reason = str(parsed.get("reason") or "").strip()
+            return {"include": include, "reason": reason or ("适合进入阶段总结" if include else "不适合进入阶段总结")}
+        except Exception as exc:
+            logger.warning("LLM QA summary-context assessment failed, using heuristic: %s", exc)
+            return self._fallback_project_qa_summary_assessment(question=question, answer=answer)
+
     async def _generate(self, system_prompt: str, user_prompt: str, max_output_tokens: int | None = None) -> str:
         if self.provider == "ollama":
             return await self._generate_ollama(system_prompt, user_prompt, max_output_tokens)
 
         if self.provider in {"openai", "openai_compatible", "compatible", "deepseek"}:
-            mode = settings.openai_api_mode.lower().strip()
-            if self.provider != "openai" and mode == "responses":
-                mode = "chat_completions"
+            mode = self._api_mode()
             if mode in {"chat", "chat_completions", "chat-completions"}:
                 return await self._generate_openai_chat(system_prompt, user_prompt, max_output_tokens)
             return await self._generate_openai_responses(system_prompt, user_prompt, max_output_tokens)
@@ -105,6 +242,12 @@ class LLMClient:
         if self.provider == "deepseek" and base_url == DEFAULT_OPENAI_BASE_URL:
             return DEFAULT_DEEPSEEK_BASE_URL
         return base_url
+
+    def _api_mode(self) -> str:
+        mode = settings.openai_api_mode.lower().strip()
+        if self.provider not in {"openai", "deepseek"} and mode == "responses":
+            return "chat_completions"
+        return mode
 
     async def _generate_openai_responses(
         self,
@@ -146,6 +289,208 @@ class LLMClient:
             ],
             "temperature": settings.llm_temperature,
             "max_tokens": max_output_tokens or settings.llm_max_output_tokens,
+        }
+        data = await self._post_json(
+            url=f"{self.openai_base_url}/chat/completions",
+            payload=payload,
+            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+        )
+        try:
+            return data["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError, TypeError) as exc:
+            raise LLMClientError(f"Unexpected chat completions response: {data}") from exc
+
+    async def _extract_text_from_images_responses(self, images: list[bytes], filename: str) -> str:
+        return await self._generate_from_images_responses(
+            images=images,
+            system_prompt="你是严谨的科研 PDF 图像转文本助手，只输出从页面中识别到的文本。",
+            user_prompt=(
+                f"请从用户上传资料 {filename} 的页面图片中提取可用于科研入库的正文文本。"
+                "保留标题、摘要、关键词、章节标题、图表题注和重要段落。"
+                "不要解释任务，不要输出思考过程，不要编造图片中不存在的内容；看不清的位置写“局部文字不可读”。"
+            ),
+            max_output_tokens=settings.llm_max_output_tokens,
+        )
+
+    async def _extract_text_from_image_urls_responses(self, image_urls: list[str], filename: str) -> str:
+        return await self._generate_from_image_urls_responses(
+            image_urls=image_urls,
+            system_prompt="你是严谨的科研 PDF 图像转文本助手，只输出从页面中识别到的文本。",
+            user_prompt=(
+                f"请从用户上传资料 {filename} 的页面图片中提取可用于科研入库的正文文本。"
+                "保留标题、摘要、关键词、章节标题、图表题注和重要段落。"
+                "不要解释任务，不要输出思考过程，不要编造图片中不存在的内容；看不清的位置写“局部文字不可读”。"
+            ),
+            max_output_tokens=settings.llm_max_output_tokens,
+        )
+
+    async def _extract_text_from_images_chat(self, images: list[bytes], filename: str) -> str:
+        return await self._generate_from_images_chat(
+            images=images,
+            system_prompt="你是严谨的科研 PDF 图像转文本助手，只输出从页面中识别到的文本。",
+            user_prompt=(
+                f"请从用户上传资料 {filename} 的页面图片中提取可用于科研入库的正文文本。"
+                "保留标题、摘要、关键词、章节标题、图表题注和重要段落。"
+                "不要解释任务，不要输出思考过程，不要编造图片中不存在的内容；看不清的位置写“局部文字不可读”。"
+            ),
+            max_output_tokens=settings.llm_max_output_tokens,
+        )
+
+    async def _extract_text_from_image_urls_chat(self, image_urls: list[str], filename: str) -> str:
+        return await self._generate_from_image_urls_chat(
+            image_urls=image_urls,
+            system_prompt="你是严谨的科研 PDF 图像转文本助手，只输出从页面中识别到的文本。",
+            user_prompt=(
+                f"请从用户上传资料 {filename} 的页面图片中提取可用于科研入库的正文文本。"
+                "保留标题、摘要、关键词、章节标题、图表题注和重要段落。"
+                "不要解释任务，不要输出思考过程，不要编造图片中不存在的内容；看不清的位置写“局部文字不可读”。"
+            ),
+            max_output_tokens=settings.llm_max_output_tokens,
+        )
+
+    async def _generate_from_images(
+        self,
+        images: list[bytes],
+        filename: str,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+    ) -> str:
+        _ = filename
+        if self.provider == "ollama":
+            raise LLMClientError("Ollama multimodal extraction is not implemented")
+        mode = self._api_mode()
+        if mode in {"chat", "chat_completions", "chat-completions"}:
+            return await self._generate_from_images_chat(images, system_prompt, user_prompt, max_output_tokens)
+        return await self._generate_from_images_responses(images, system_prompt, user_prompt, max_output_tokens)
+
+    async def _generate_from_image_urls(
+        self,
+        image_urls: list[str],
+        filename: str,
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+    ) -> str:
+        _ = filename
+        if self.provider == "ollama":
+            raise LLMClientError("Ollama multimodal extraction is not implemented")
+        mode = self._api_mode()
+        if mode in {"chat", "chat_completions", "chat-completions"}:
+            return await self._generate_from_image_urls_chat(image_urls, system_prompt, user_prompt, max_output_tokens)
+        return await self._generate_from_image_urls_responses(image_urls, system_prompt, user_prompt, max_output_tokens)
+
+    async def _generate_from_images_responses(
+        self,
+        images: list[bytes],
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+    ) -> str:
+        if not settings.openai_api_key:
+            raise LLMClientError("OPENAI_API_KEY is not configured")
+
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": user_prompt}]
+        for image in images:
+            content.append({"type": "input_image", "image_url": self._image_data_url(image)})
+
+        payload: dict[str, Any] = {
+            "model": self._vision_model(),
+            "instructions": system_prompt,
+            "input": [{"role": "user", "content": content}],
+            "temperature": 0,
+            "max_output_tokens": max_output_tokens,
+        }
+        data = await self._post_json(
+            url=f"{self.openai_base_url}/responses",
+            payload=payload,
+            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+        )
+        return self._extract_responses_text(data)
+
+    async def _generate_from_image_urls_responses(
+        self,
+        image_urls: list[str],
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+    ) -> str:
+        if not settings.openai_api_key:
+            raise LLMClientError("OPENAI_API_KEY is not configured")
+
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": user_prompt}]
+        for image_url in image_urls:
+            content.append({"type": "input_image", "image_url": image_url})
+
+        payload: dict[str, Any] = {
+            "model": self._vision_model(),
+            "instructions": system_prompt,
+            "input": [{"role": "user", "content": content}],
+            "temperature": 0,
+            "max_output_tokens": max_output_tokens,
+        }
+        data = await self._post_json(
+            url=f"{self.openai_base_url}/responses",
+            payload=payload,
+            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+        )
+        return self._extract_responses_text(data)
+
+    async def _generate_from_images_chat(
+        self,
+        images: list[bytes],
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+    ) -> str:
+        if not settings.openai_api_key:
+            raise LLMClientError("OPENAI_API_KEY is not configured")
+
+        content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+        for image in images:
+            content.append({"type": "image_url", "image_url": {"url": self._image_data_url(image)}})
+
+        payload: dict[str, Any] = {
+            "model": self._vision_model(),
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content},
+            ],
+            "temperature": 0,
+            "max_tokens": max_output_tokens,
+        }
+        data = await self._post_json(
+            url=f"{self.openai_base_url}/chat/completions",
+            payload=payload,
+            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+        )
+        try:
+            return data["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError, TypeError) as exc:
+            raise LLMClientError(f"Unexpected chat completions response: {data}") from exc
+
+    async def _generate_from_image_urls_chat(
+        self,
+        image_urls: list[str],
+        system_prompt: str,
+        user_prompt: str,
+        max_output_tokens: int,
+    ) -> str:
+        if not settings.openai_api_key:
+            raise LLMClientError("OPENAI_API_KEY is not configured")
+
+        content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+        for image_url in image_urls:
+            content.append({"type": "image_url", "image_url": {"url": image_url}})
+
+        payload: dict[str, Any] = {
+            "model": self._vision_model(),
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content},
+            ],
+            "temperature": 0,
+            "max_tokens": max_output_tokens,
         }
         data = await self._post_json(
             url=f"{self.openai_base_url}/chat/completions",
@@ -203,7 +548,13 @@ class LLMClient:
 
         parts: list[str] = []
         for item in data.get("output", []) or []:
+            item_type = str(item.get("type") or "").lower()
+            if item_type and item_type != "message":
+                continue
             for content in item.get("content", []) or []:
+                content_type = str(content.get("type") or "").lower()
+                if content_type and content_type not in {"output_text", "text"}:
+                    continue
                 text = content.get("text")
                 if isinstance(text, str) and text.strip():
                     parts.append(text.strip())
@@ -253,8 +604,82 @@ class LLMClient:
             return [query, f"{query} survey", f"{query} recent advances"]
         return [query, f"{query} applications", f"{query} methods comparison"]
 
+    def _fallback_project_qa_summary_assessment(self, question: str, answer: str) -> dict[str, Any]:
+        text = f"{question}\n{answer}".strip()
+        lowered = text.lower()
+        trivial_markers = ("test", "hello", "hi", "ping", "随便", "测试", "你好", "在吗", "谢谢")
+        research_markers = (
+            "研究",
+            "方法",
+            "实验",
+            "结论",
+            "证据",
+            "机制",
+            "进展",
+            "风险",
+            "方案",
+            "数据",
+            "模型",
+            "analysis",
+            "method",
+            "evidence",
+            "result",
+            "study",
+        )
+        if len(text) < 20 or any(marker in lowered for marker in trivial_markers):
+            return {"include": False, "reason": "问题或回答缺少有效研究信息"}
+        if any(marker in lowered for marker in research_markers):
+            return {"include": True, "reason": "包含研究相关信息，可用于阶段总结"}
+        return {"include": False, "reason": "未识别到明确研究推进价值"}
+
     def _contains_cjk(self, text: str) -> bool:
         return bool(re.search(r"[\u4e00-\u9fff]", text))
+
+    def _validate_vision_model(self) -> None:
+        model = self._vision_model()
+        base_url = self.openai_base_url.lower()
+        if self.provider == "deepseek" or "api.deepseek.com" in base_url:
+            if model != "deepseek-v4-flash-vision-exp":
+                raise LLMClientError(
+                    "DeepSeek image input requires model `deepseek-v4-flash-vision-exp`. "
+                    f"Current model is `{model}`."
+                )
+
+    def _vision_model(self) -> str:
+        if settings.pdf_multimodal_model:
+            return settings.pdf_multimodal_model
+        base_url = self.openai_base_url.lower()
+        if self.provider == "deepseek" or "api.deepseek.com" in base_url:
+            return settings.deepseek_vision_model
+        return settings.openai_model
+
+    def _validate_multimodal_text(self, text: str) -> str:
+        cleaned = text.strip()
+        if not cleaned:
+            raise LLMClientError("Multimodal extraction returned empty text")
+
+        unsupported_markers = (
+            "[unsupported image]",
+            "unsupported image",
+            "无法看到上传的图片内容",
+            "图片显示为",
+            "无法读取图片内容",
+            "无法识别图片内容",
+            "不能读取图片",
+            "不支持图片",
+            "图片格式不被支持",
+            "未能成功上传",
+            "重新上传",
+            "直接上传可读取的 pdf",
+            "收到可用的图片后",
+        )
+        lowered = cleaned.lower()
+        if any(marker in lowered for marker in unsupported_markers):
+            raise LLMClientError(f"Multimodal extraction did not process images: {cleaned[:300]}")
+        return cleaned
+
+    def _image_data_url(self, image: bytes) -> str:
+        return "data:image/png;base64," + base64.b64encode(image).decode("ascii")
 
     def _clip(self, text: str, max_chars: int) -> str:
         text = text.strip()
