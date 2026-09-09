@@ -20,10 +20,33 @@ class LLMClientError(RuntimeError):
 
 
 class LLMClient:
-    def __init__(self) -> None:
-        self.provider = settings.llm_provider.lower().strip()
+    def __init__(
+        self,
+        *,
+        provider: str | None = None,
+        openai_api_key: str | None = None,
+        openai_base_url: str | None = None,
+        openai_api_mode: str | None = None,
+        openai_model: str | None = None,
+        vision_model: str | None = None,
+        ollama_base_url: str | None = None,
+        ollama_model: str | None = None,
+        temperature: float | None = None,
+        timeout_seconds: float | None = None,
+        max_output_tokens: int | None = None,
+    ) -> None:
+        self.provider = (provider or settings.llm_provider).lower().strip()
+        self.openai_api_key = openai_api_key if openai_api_key is not None else settings.openai_api_key
+        self.openai_api_mode = openai_api_mode or settings.openai_api_mode
+        self.openai_model = openai_model or settings.openai_model
+        self.runtime_vision_model = vision_model
+        self.ollama_model = ollama_model or settings.local_ollama_model
+        self.llm_temperature = settings.llm_temperature if temperature is None else temperature
+        self.llm_timeout_seconds = settings.llm_timeout_seconds if timeout_seconds is None else timeout_seconds
+        self.llm_max_output_tokens = max_output_tokens or settings.llm_max_output_tokens
+        self._runtime_openai_base_url = openai_base_url
         self.openai_base_url = self._resolve_openai_base_url()
-        self.ollama_base_url = settings.local_ollama_base_url.rstrip("/")
+        self.ollama_base_url = (ollama_base_url or settings.local_ollama_base_url).rstrip("/")
 
     async def rewrite_query(self, query: str) -> list[str]:
         system_prompt = (
@@ -234,17 +257,17 @@ class LLMClient:
                 return await self._generate_openai_chat(system_prompt, user_prompt, max_output_tokens)
             return await self._generate_openai_responses(system_prompt, user_prompt, max_output_tokens)
 
-        logger.warning("Unknown LLM_PROVIDER=%s, trying OpenAI-compatible chat completions", settings.llm_provider)
+        logger.warning("Unknown LLM provider=%s, trying OpenAI-compatible chat completions", self.provider)
         return await self._generate_openai_chat(system_prompt, user_prompt, max_output_tokens)
 
     def _resolve_openai_base_url(self) -> str:
-        base_url = settings.openai_base_url.rstrip("/")
+        base_url = (self._runtime_openai_base_url or settings.openai_base_url).rstrip("/")
         if self.provider == "deepseek" and base_url == DEFAULT_OPENAI_BASE_URL:
             return DEFAULT_DEEPSEEK_BASE_URL
         return base_url
 
     def _api_mode(self) -> str:
-        mode = settings.openai_api_mode.lower().strip()
+        mode = self.openai_api_mode.lower().strip()
         if self.provider not in {"openai", "deepseek"} and mode == "responses":
             return "chat_completions"
         return mode
@@ -255,20 +278,20 @@ class LLMClient:
         user_prompt: str,
         max_output_tokens: int | None,
     ) -> str:
-        if not settings.openai_api_key:
+        if not self.openai_api_key:
             raise LLMClientError("OPENAI_API_KEY is not configured")
 
         payload: dict[str, Any] = {
-            "model": settings.openai_model,
+            "model": self.openai_model,
             "instructions": system_prompt,
             "input": user_prompt,
-            "temperature": settings.llm_temperature,
-            "max_output_tokens": max_output_tokens or settings.llm_max_output_tokens,
+            "temperature": self.llm_temperature,
+            "max_output_tokens": max_output_tokens or self.llm_max_output_tokens,
         }
         data = await self._post_json(
             url=f"{self.openai_base_url}/responses",
             payload=payload,
-            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            headers={"Authorization": f"Bearer {self.openai_api_key}"},
         )
         return self._extract_responses_text(data)
 
@@ -278,22 +301,22 @@ class LLMClient:
         user_prompt: str,
         max_output_tokens: int | None,
     ) -> str:
-        if not settings.openai_api_key:
+        if not self.openai_api_key:
             raise LLMClientError("OPENAI_API_KEY is not configured")
 
         payload: dict[str, Any] = {
-            "model": settings.openai_model,
+            "model": self.openai_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            "temperature": settings.llm_temperature,
-            "max_tokens": max_output_tokens or settings.llm_max_output_tokens,
+            "temperature": self.llm_temperature,
+            "max_tokens": max_output_tokens or self.llm_max_output_tokens,
         }
         data = await self._post_json(
             url=f"{self.openai_base_url}/chat/completions",
             payload=payload,
-            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            headers={"Authorization": f"Bearer {self.openai_api_key}"},
         )
         try:
             return data["choices"][0]["message"]["content"].strip()
@@ -309,7 +332,7 @@ class LLMClient:
                 "保留标题、摘要、关键词、章节标题、图表题注和重要段落。"
                 "不要解释任务，不要输出思考过程，不要编造图片中不存在的内容；看不清的位置写“局部文字不可读”。"
             ),
-            max_output_tokens=settings.llm_max_output_tokens,
+            max_output_tokens=self.llm_max_output_tokens,
         )
 
     async def _extract_text_from_image_urls_responses(self, image_urls: list[str], filename: str) -> str:
@@ -321,7 +344,7 @@ class LLMClient:
                 "保留标题、摘要、关键词、章节标题、图表题注和重要段落。"
                 "不要解释任务，不要输出思考过程，不要编造图片中不存在的内容；看不清的位置写“局部文字不可读”。"
             ),
-            max_output_tokens=settings.llm_max_output_tokens,
+            max_output_tokens=self.llm_max_output_tokens,
         )
 
     async def _extract_text_from_images_chat(self, images: list[bytes], filename: str) -> str:
@@ -333,7 +356,7 @@ class LLMClient:
                 "保留标题、摘要、关键词、章节标题、图表题注和重要段落。"
                 "不要解释任务，不要输出思考过程，不要编造图片中不存在的内容；看不清的位置写“局部文字不可读”。"
             ),
-            max_output_tokens=settings.llm_max_output_tokens,
+            max_output_tokens=self.llm_max_output_tokens,
         )
 
     async def _extract_text_from_image_urls_chat(self, image_urls: list[str], filename: str) -> str:
@@ -345,7 +368,7 @@ class LLMClient:
                 "保留标题、摘要、关键词、章节标题、图表题注和重要段落。"
                 "不要解释任务，不要输出思考过程，不要编造图片中不存在的内容；看不清的位置写“局部文字不可读”。"
             ),
-            max_output_tokens=settings.llm_max_output_tokens,
+            max_output_tokens=self.llm_max_output_tokens,
         )
 
     async def _generate_from_images(
@@ -387,7 +410,7 @@ class LLMClient:
         user_prompt: str,
         max_output_tokens: int,
     ) -> str:
-        if not settings.openai_api_key:
+        if not self.openai_api_key:
             raise LLMClientError("OPENAI_API_KEY is not configured")
 
         content: list[dict[str, Any]] = [{"type": "input_text", "text": user_prompt}]
@@ -404,7 +427,7 @@ class LLMClient:
         data = await self._post_json(
             url=f"{self.openai_base_url}/responses",
             payload=payload,
-            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            headers={"Authorization": f"Bearer {self.openai_api_key}"},
         )
         return self._extract_responses_text(data)
 
@@ -415,7 +438,7 @@ class LLMClient:
         user_prompt: str,
         max_output_tokens: int,
     ) -> str:
-        if not settings.openai_api_key:
+        if not self.openai_api_key:
             raise LLMClientError("OPENAI_API_KEY is not configured")
 
         content: list[dict[str, Any]] = [{"type": "input_text", "text": user_prompt}]
@@ -432,7 +455,7 @@ class LLMClient:
         data = await self._post_json(
             url=f"{self.openai_base_url}/responses",
             payload=payload,
-            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            headers={"Authorization": f"Bearer {self.openai_api_key}"},
         )
         return self._extract_responses_text(data)
 
@@ -443,7 +466,7 @@ class LLMClient:
         user_prompt: str,
         max_output_tokens: int,
     ) -> str:
-        if not settings.openai_api_key:
+        if not self.openai_api_key:
             raise LLMClientError("OPENAI_API_KEY is not configured")
 
         content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
@@ -462,7 +485,7 @@ class LLMClient:
         data = await self._post_json(
             url=f"{self.openai_base_url}/chat/completions",
             payload=payload,
-            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            headers={"Authorization": f"Bearer {self.openai_api_key}"},
         )
         try:
             return data["choices"][0]["message"]["content"].strip()
@@ -476,7 +499,7 @@ class LLMClient:
         user_prompt: str,
         max_output_tokens: int,
     ) -> str:
-        if not settings.openai_api_key:
+        if not self.openai_api_key:
             raise LLMClientError("OPENAI_API_KEY is not configured")
 
         content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
@@ -495,7 +518,7 @@ class LLMClient:
         data = await self._post_json(
             url=f"{self.openai_base_url}/chat/completions",
             payload=payload,
-            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+            headers={"Authorization": f"Bearer {self.openai_api_key}"},
         )
         try:
             return data["choices"][0]["message"]["content"].strip()
@@ -509,15 +532,15 @@ class LLMClient:
         max_output_tokens: int | None,
     ) -> str:
         payload: dict[str, Any] = {
-            "model": settings.local_ollama_model,
+            "model": self.ollama_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             "stream": False,
             "options": {
-                "temperature": settings.llm_temperature,
-                "num_predict": max_output_tokens or settings.llm_max_output_tokens,
+                "temperature": self.llm_temperature,
+                "num_predict": max_output_tokens or self.llm_max_output_tokens,
             },
         }
         data = await self._post_json(url=f"{self.ollama_base_url}/api/chat", payload=payload, headers={})
@@ -529,7 +552,7 @@ class LLMClient:
     async def _post_json(self, url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
         request_headers = {"Content-Type": "application/json", **headers}
         try:
-            async with httpx.AsyncClient(timeout=settings.llm_timeout_seconds) as client:
+            async with httpx.AsyncClient(timeout=self.llm_timeout_seconds) as client:
                 response = await client.post(url, json=payload, headers=request_headers)
                 response.raise_for_status()
                 return response.json()
@@ -646,12 +669,14 @@ class LLMClient:
                 )
 
     def _vision_model(self) -> str:
+        if self.runtime_vision_model:
+            return self.runtime_vision_model
         if settings.pdf_multimodal_model:
             return settings.pdf_multimodal_model
         base_url = self.openai_base_url.lower()
         if self.provider == "deepseek" or "api.deepseek.com" in base_url:
             return settings.deepseek_vision_model
-        return settings.openai_model
+        return self.openai_model
 
     def _validate_multimodal_text(self, text: str) -> str:
         cleaned = text.strip()

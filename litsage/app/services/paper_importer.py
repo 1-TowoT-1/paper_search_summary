@@ -358,7 +358,8 @@ class PaperImporter:
         if paper is not None:
             if imported.pdf_url and not paper.pdf_url:
                 paper.pdf_url = imported.pdf_url
-            if include_pdf and imported.pdf_url:
+            self._merge_existing_full_text_hints(paper=paper, imported=imported)
+            if include_pdf and self._can_attempt_full_text(imported):
                 if (
                     self._pdf_completed(paper)
                     and await self.vector_store.has_paper_chunks(paper.id)
@@ -394,7 +395,7 @@ class PaperImporter:
         )
         stats.inc("abstract_vectorized")
 
-        if include_pdf and imported.pdf_url:
+        if include_pdf and self._can_attempt_full_text(imported):
             pdf_result = await self._try_process_pdf(db=db, paper_id=paper.id, imported=imported, stats=stats)
             self._set_pdf_metadata(paper, pdf_result)
 
@@ -420,6 +421,20 @@ class PaperImporter:
         if imported.doi:
             filters.append(Paper.doi == imported.doi)
         return db.query(Paper).filter(or_(*filters)).first()
+
+    def _can_attempt_full_text(self, imported: ImportedPaper) -> bool:
+        if imported.pdf_url:
+            return True
+        if imported.source == LiteratureSource.pubmed.value and str(imported.metadata.get("pmc_id") or "").strip():
+            return True
+        return False
+
+    def _merge_existing_full_text_hints(self, paper: Paper, imported: ImportedPaper) -> None:
+        if not imported.pdf_url and paper.pdf_url:
+            imported.pdf_url = paper.pdf_url
+        existing_metadata = paper.metadata_json if isinstance(paper.metadata_json, dict) else {}
+        if existing_metadata:
+            imported.metadata = {**existing_metadata, **(imported.metadata or {})}
 
     def _apply_imported_fields(self, paper: Paper, imported: ImportedPaper) -> None:
         paper.title = imported.title

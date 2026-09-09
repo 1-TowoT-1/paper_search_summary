@@ -774,6 +774,49 @@ def test_pdf_multimodal_model_overrides_deepseek_vision_model(monkeypatch: pytes
         client._validate_vision_model()
 
 
+def test_llm_client_runtime_config_overrides_env_settings() -> None:
+    client = LLMClient(
+        provider="openai_compatible",
+        openai_api_key="user-owned-key",
+        openai_base_url="https://example-llm.test/v1",
+        openai_api_mode="chat",
+        openai_model="caller-text-model",
+        vision_model="caller-vision-model",
+        temperature=0.3,
+        timeout_seconds=12,
+        max_output_tokens=777,
+    )
+
+    assert client.openai_api_key == "user-owned-key"
+    assert client.openai_base_url == "https://example-llm.test/v1"
+    assert client._api_mode() == "chat"
+    assert client.openai_model == "caller-text-model"
+    assert client._vision_model() == "caller-vision-model"
+    assert client.llm_temperature == 0.3
+    assert client.llm_timeout_seconds == 12
+    assert client.llm_max_output_tokens == 777
+
+
+def test_mcp_runtime_requires_user_llm_config_for_remote_models() -> None:
+    from app.mcp.runtime import build_user_llm
+
+    with pytest.raises(ValueError):
+        build_user_llm(None)
+
+    with pytest.raises(ValueError):
+        build_user_llm({"provider": "deepseek", "model": "deepseek-v4-flash"})
+
+    client = build_user_llm({"provider": "Ollama", "model": "local", "ollama_model": "local"})
+
+    assert client.provider == "ollama"
+
+
+def test_mcp_server_imports_with_fastmcp_v1() -> None:
+    from app.mcp import server
+
+    assert server.mcp is not None
+
+
 def test_pdf_importer_uses_browser_headers_for_publisher_downloads() -> None:
     importer = PaperImporter()
 
@@ -866,6 +909,9 @@ async def test_pdf_importer_prefers_structured_full_text_before_pdf_download() -
     stats = ImportStats()
 
     class FakeStructuredResolver:
+        async def resolve_pubmed_pdf(self, **_kwargs):
+            return PDFResolveResult(pdf_url=None, source="pubmed", error="PDF URL not resolved")
+
         async def resolve_pmc_full_text(self, pmc_id):
             assert pmc_id == "PMC13408697"
             return StructuredFullTextResult(
@@ -923,4 +969,190 @@ async def test_pdf_importer_prefers_structured_full_text_before_pdf_download() -
     assert db.added
     assert db.added[0].metadata_json["extraction_method"] == "pmc_bioc"
     assert db.added[0].metadata_json["structured_fulltext_url"] == "https://example.test/pmc/PMC13408697/bioc"
+
+
+@pytest.mark.asyncio
+async def test_import_selected_candidate_with_pmc_id_uses_structured_full_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    importer = PaperImporter()
+    paper_id = uuid4()
+    stats = ImportStats()
+    existing_paper = Paper(
+        id=paper_id,
+        title="PMC candidate",
+        source="pubmed",
+        source_id="40808340",
+        metadata_json={},
+    )
+
+    class FakeQuery:
+        def filter(self, *_args):
+            return self
+
+        def first(self):
+            return existing_paper
+
+        def delete(self, synchronize_session=False):
+            _ = synchronize_session
+            return 0
+
+    class FakeSession:
+        def __init__(self):
+            self.added = []
+            self.committed = False
+
+        def query(self, _model):
+            return FakeQuery()
+
+        def add(self, item):
+            self.added.append(item)
+
+        def commit(self):
+            self.committed = True
+
+    class FakeVectorStore:
+        async def has_paper_chunks(self, _paper_id):
+            return False
+
+        async def delete_paper_chunks(self, _paper_id):
+            return 0
+
+        async def upsert_chunk(self, **_kwargs):
+            return None
+
+    class FakeEmbeddingService:
+        async def embed_text(self, _text):
+            return [0.1] * 1024
+
+    class FakeStructuredResolver:
+        async def resolve_pubmed_pdf(self, **_kwargs):
+            return PDFResolveResult(pdf_url=None, source="pubmed", error="PDF URL not resolved")
+
+        async def resolve_pmc_full_text(self, pmc_id):
+            assert pmc_id == "PMC13408697"
+            return StructuredFullTextResult(
+                text="Structured PMC full text about liver cancer methods and results. " * 80,
+                source="pmc_oai_pmh",
+                url="https://example.test/oai",
+            )
+
+    async def fail_download(_url):
+        raise AssertionError("PDF download should not run when candidate metadata contains pmc_id")
+
+    importer._vector_store = FakeVectorStore()
+    importer.embeddings = FakeEmbeddingService()
+    importer.pdf_resolver = FakeStructuredResolver()
+    importer._download_pdf = fail_download
+    monkeypatch.setattr(importer, "_postgres_has_paper_chunks", lambda _db, _paper_id: False)
+
+    candidate = ImportCandidatePaper(
+        title="PMC candidate",
+        authors=[],
+        abstract="Already has an abstract.",
+        doi="10.1038/s41467-026-74360-x",
+        source="pubmed",
+        source_id="40808340",
+        pdf_url=None,
+        metadata={"pmc_id": "PMC13408697"},
+    )
+    imported = importer._from_candidate(candidate)
+    db = FakeSession()
+
+    result = await importer._import_one(db=db, imported=imported, include_pdf=True, stats=stats)
+
+    assert result is existing_paper
+    assert stats.values["pdf_unresolved"] == 1
+    assert stats.values["pdf_retried"] == 1
+    assert stats.values["structured_fulltext_resolved"] == 1
+    assert stats.values["pdf_processed"] == 1
+    assert stats.values["pdf_skipped"] == 0
+    assert existing_paper.metadata_json["pdf_status"] == "completed"
+    assert existing_paper.metadata_json["pdf_text_extraction_method"] == "pmc_oai_pmh"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_import_reuses_existing_pmc_id_for_structured_full_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    importer = PaperImporter()
+    paper_id = uuid4()
+    stats = ImportStats()
+    existing_paper = Paper(
+        id=paper_id,
+        title="Existing PMC candidate",
+        source="pubmed",
+        source_id="40808340",
+        metadata_json={"pmc_id": "PMC13408697"},
+    )
+
+    class FakeQuery:
+        def filter(self, *_args):
+            return self
+
+        def first(self):
+            return existing_paper
+
+        def delete(self, synchronize_session=False):
+            _ = synchronize_session
+            return 0
+
+    class FakeSession:
+        def query(self, _model):
+            return FakeQuery()
+
+        def add(self, _item):
+            return None
+
+        def commit(self):
+            return None
+
+    class FakeVectorStore:
+        async def has_paper_chunks(self, _paper_id):
+            return False
+
+        async def delete_paper_chunks(self, _paper_id):
+            return 0
+
+        async def upsert_chunk(self, **_kwargs):
+            return None
+
+    class FakeEmbeddingService:
+        async def embed_text(self, _text):
+            return [0.1] * 1024
+
+    class FakeStructuredResolver:
+        async def resolve_pubmed_pdf(self, **_kwargs):
+            return PDFResolveResult(pdf_url=None, source="pubmed", error="PDF URL not resolved")
+
+        async def resolve_pmc_full_text(self, pmc_id):
+            assert pmc_id == "PMC13408697"
+            return StructuredFullTextResult(
+                text="Existing database PMCID should drive structured full text extraction. " * 80,
+                source="pmc_oai_pmh",
+                url="https://example.test/oai",
+            )
+
+    importer._vector_store = FakeVectorStore()
+    importer.embeddings = FakeEmbeddingService()
+    importer.pdf_resolver = FakeStructuredResolver()
+    monkeypatch.setattr(importer, "_postgres_has_paper_chunks", lambda _db, _paper_id: False)
+
+    imported = ImportedPaper(
+        title="Existing PMC candidate",
+        authors=[],
+        abstract="Already has an abstract.",
+        doi=None,
+        source="pubmed",
+        source_id="40808340",
+        published_date=None,
+        pdf_url=None,
+        citation_count=0,
+        metadata={},
+    )
+
+    result = await importer._import_one(db=FakeSession(), imported=imported, include_pdf=True, stats=stats)
+
+    assert result is existing_paper
+    assert stats.values["structured_fulltext_resolved"] == 1
+    assert stats.values["pdf_processed"] == 1
+    assert existing_paper.metadata_json["pdf_status"] == "completed"
 
