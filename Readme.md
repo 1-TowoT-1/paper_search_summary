@@ -1,134 +1,303 @@
-文献智能搜索与总结 Agent 项目描述模板
+# LitSage 2.0：科研文献智能检索与项目知识库系统
 
-项目概述
+## 项目概述
 
-项目名称：LitSage —— 基于大模型的文献智能搜索与总结系统
+项目名称：LitSage
 
-项目定位：面向科研人员的智能文献助手，支持自然语言检索、多维筛选、自动摘要与知识问答。
+项目定位：面向医学科研人员的文献检索、私有资料管理、项目知识库问答与阶段性总结平台。
 
-核心价值：将传统关键词检索升级为语义检索，将逐篇阅读压缩为智能总结，显著提升文献调研效率。
+核心价值：将公开文献、用户私有资料、研究问答和阶段总结统一沉淀到研究项目中，使科研人员不仅能够“找到文献”，还能够围绕课题持续积累证据、追踪问题并整理研究思路。
 
-技术栈
+当前版本定位：
 
-层级 技术选型 用途说明
-后端框架 FastAPI 提供 RESTful API 与 WebSocket 接口
-任务队列 Celery + Redis 异步处理文献抓取、向量化等耗时任务
-缓存层 Redis 缓存热点查询结果、用户会话、API 限流计数
-关系数据库 PostgreSQL 存储文献元数据、用户信息、项目/收藏关系
-向量数据库 Milvus 存储文献 embedding，支持语义相似度检索
-大模型 OpenAI / 本地 ollama 部署 摘要生成、查询改写、RAG 问答
-嵌入模型 BGE-M3 / text-embedding-3-large 文献标题/摘要向量化
-RAG 框架 LangChain / LlamaIndex 检索增强生成的编排与 Prompt 管理
-文献数据源 arXiv API / Semantic Scholar / PubMed 外部文献数据获取
+> LitSage 2.0 是一个具备 Agent 化扩展基础的科研文献知识库与 RAG 分析系统。
 
-核心功能模块
+系统已经实现文献检索、全文获取、资料解析、向量化、项目管理、知识库问答、阶段总结和 MCP 工具接口。当前尚未实现成熟 Agent 所需的自主任务规划、持久化运行状态、多工具自动编排和自我校验闭环，因此更准确的描述是 Agent-ready，而不是完全自主的科研 Agent。
 
-1. 文献数据管理模块
+## 适用场景
 
-· 支持从 arXiv、Semantic Scholar、PubMed 等数据源批量抓取文献元数据（标题、作者、摘要、发表时间、DOI 等）
-· 文献入库时自动向量化（标题 + 摘要拼接后生成 embedding），写入向量数据库
-· 支持 PDF 全文解析（PyMuPDF），全文切片后存入向量库以支持深度问答
-· PostgreSQL 存储完整元数据，与向量库通过文献 ID 关联
+- 从 PubMed 检索医学文献，筛选后直接导入个人文献库或研究项目。
+- 上传 PDF、Word、Markdown、内部报告和未发表资料，建立私有科研知识库。
+- 围绕特定研究项目进行文献问答，并保留回答引用和历史记录。
+- 根据用户提出的阶段性问题，总结项目已有证据、研究方法和当前进展。
+- 将文献检索、资料入库和知识库问答能力通过 MCP 提供给外部 Agent。
 
-2. 智能搜索模块
+## 技术栈
 
-· 语义搜索：用户输入自然语言描述（如 "transformer 在时间序列预测中的应用"），系统使用 embedding 进行向量相似度检索
-· 混合搜索：结合 PostgreSQL 关键词过滤（年份、作者、期刊、引用数）与向量相似度排序
-· 查询改写：使用 LLM 对用户原始 query 进行扩展和改写，生成多路检索查询，提升召回率
-· 重排序（Rerank）：粗召回 Top-100 后使用 Cross-Encoder 模型精排，返回 Top-20
+| 层级 | 技术选型 | 用途说明 | 当前状态 |
+| --- | --- | --- | --- |
+| 后端框架 | FastAPI | REST API、认证、业务服务入口 | 已实现 |
+| 前端界面 | Streamlit | 本地使用、功能测试与项目演示 | 已实现 |
+| 数据访问 | SQLAlchemy + Pydantic | ORM、数据校验和接口模型 | 已实现 |
+| 数据库迁移 | Alembic | PostgreSQL 表结构版本管理 | 已实现 |
+| 关系数据库 | PostgreSQL | 用户、项目、文献、文件、切片、问答和任务 | 已实现 |
+| 向量数据库 | Milvus | 摘要和全文切片的向量存储与召回 | 已实现 |
+| 缓存与任务基础 | Redis + Celery | 缓存与异步任务架构预留 | 基础接入 |
+| 大模型 | OpenAI-compatible / DeepSeek / Ollama | 查询改写、RAG 回答、总结及多模态解析 | 已实现 |
+| Embedding | 本地 BGE / Ollama / 兼容接口 | 生成 1024 维摘要和全文向量 | 已实现 |
+| 文档解析 | PyMuPDF + python-docx | PDF、DOCX 和 Markdown 文本提取 | 已实现 |
+| OCR | Tesseract OCR | 扫描型 PDF 文本识别兜底 | 可配置 |
+| 多模态解析 | 独立视觉模型配置 | PDF 页面和复杂版式识别 | 可配置 |
+| 工具协议 | MCP Python SDK | 向外部 Agent 暴露系统能力 | 已实现 |
+| 外部数据源 | PubMed / PMC、arXiv、Semantic Scholar | 文献检索、元数据和公开全文获取 | 已实现/可扩展 |
 
-3. RAG 文献问答模块
+## 系统架构
 
-· 用户可针对单篇文献或一个文献集合（如某个搜索结果）进行问答
-· 检索流程：用户问题 → 向量检索相关文献片段 → 拼接上下文 → LLM 生成回答（带引用标注）
-· 支持对话记忆（Redis 存储会话历史），多轮追问
-· 回答中引用具体文献和片段位置，保证可溯源性
-
-4. 智能总结模块
-
-· 单篇总结：对文献全文或摘要生成结构化总结（研究背景、方法、创新点、局限）
-· 批量总结：对一组文献生成综述性对比总结（研究脉络、主流方法、待解决问题）
-· 总结结果支持 Markdown 格式导出
-· 总结任务通过 Celery 异步执行，避免阻塞 API
-
-5. 用户与项目模块
-
-· 用户注册/登录（JWT 认证）
-· 用户可创建"研究项目"，将搜索结果、文献收藏归档到项目下
-· 项目内支持批量总结和聚合问答
-
-关键工作流程
-
-流程一：文献搜索
-
-```
-用户输入自然语言查询
-    → LLM 查询改写（生成 2-3 个变体）
-    → 每个变体分别进行向量检索
-    → 结果合并去重
-    → 元数据过滤（PostgreSQL）
-    → Cross-Encoder 重排序
-    → 返回结果列表
-    → 缓存查询结果（Redis，TTL 10min）
+```text
+Streamlit 前端            外部 MCP Client
+      │                         │
+      ├──── REST API ───────────┤ MCP Tools
+      │                         │
+      ▼                         ▼
+                FastAPI / Service Layer
+      ┌──────────────┬───────────────┬──────────────┐
+      │ 文献检索导入 │ 用户资料解析  │ RAG/阶段总结 │
+      └──────┬───────┴───────┬───────┴──────┬───────┘
+             │               │              │
+       PubMed / PMC      LLM / OCR      Embedding
+             │               │              │
+             └───────────────┼──────────────┘
+                             │
+                   PostgreSQL + Milvus
 ```
 
-流程二：文献入库
+PostgreSQL 负责业务事实、权限和可审计文本，Milvus 负责向量召回。两者通过文献 ID 和切片 ID 关联，避免只在向量库中保存不可追踪的内容。
 
+## 核心功能模块
+
+### 1. 用户与认证模块
+
+- 用户注册、登录和 JWT 身份认证。
+- 获取当前用户信息。
+- 邮箱验证码发送与邮箱修改。
+- 登录密码修改。
+- 所有项目、私有资料和问答操作均按用户范围进行约束。
+
+### 2. 数据库文献检索与导入模块
+
+- 支持从外部文献数据源检索候选文献，医学场景默认优先 PubMed。
+- 保存标题、作者、摘要、DOI、PMID、PMCID、发表时间、来源和全文地址等元数据。
+- 支持“先检索预览、再勾选导入”，避免无关候选文献直接写入数据库。
+- 支持中文检索问题通过大模型改写为适合 PubMed 的英文检索词。
+- 候选文献可以在导入时直接绑定到已有研究项目。
+- DOI 在前端展示为可点击链接，便于用户访问文献原始页面。
+- 基于 DOI、外部来源 ID 等标识执行重复检测。
+- 已存在文献但缺少全文时，可重新尝试全文解析，而不是简单跳过。
+
+### 3. PubMed / PMC 全文获取模块
+
+PubMed 记录不等于可直接下载的 PDF。系统对医学公开文献采用分层获取策略：
+
+1. 从 PubMed 元数据中识别 PMID、PMCID 和 DOI。
+2. 存在 PMCID 时，优先调用 PMC 官方结构化全文接口。
+3. 结构化全文不可用时，再解析并下载真实 PDF。
+4. 检查响应内容是否确实为 PDF，拒绝把验证码或 JavaScript challenge 页面当成论文。
+5. PDF 下载或解析失败时保留有效元数据，并记录失败状态供后续重试。
+
+PMC 官方结构化全文能够减少 URL 跳转、防爬页面和出版商权限限制对入库流程的影响，也是当前 PubMed 全文导入的首选路径。
+
+### 4. 用户自带资料入库模块
+
+- 支持 PDF、DOCX 和 Markdown 文件。
+- 支持一次选择并上传多份资料。
+- 文件第一版保存在本地目录，并在数据库记录文件信息和 SHA-256。
+- 资料可以绑定研究项目，也可以只保存到个人资料库。
+- 用户资料和未发表资料默认设置为 `private`。
+- 用户可以手动输入 title 和 abstract，覆盖自动识别结果。
+- 相同用户重复上传同一文件时返回已有资料，避免重复解析和向量化。
+- 没有可用摘要或 Embedding 失败时不完成知识库入库，防止低质量内容进入后续问答。
+
+### 5. 多层文档解析模块
+
+系统根据文献来源和文件质量组合使用以下策略：
+
+1. PMC 官方结构化全文。
+2. PDF 原生文本提取。
+3. PDF 页面渲染为 PNG 后调用视觉模型。
+4. Tesseract OCR 兜底。
+5. 用户手动提供标题和摘要。
+
+解析结果会过滤 `[Unsupported Image]`、`[无法识别]` 和模型道歉文本等无效内容，避免错误文本被写入 `paper_chunks` 并污染 RAG 检索。
+
+### 6. 向量化与知识库模块
+
+- 对标题和摘要生成 Embedding，写入 Milvus `paper_abstracts`。
+- 对全文进行分块和重叠处理，写入 PostgreSQL `paper_chunks`。
+- 对每个有效全文切片生成 Embedding，写入 Milvus `paper_chunks`。
+- 默认向量维度为 1024，入库前检查实际输出维度。
+- PostgreSQL 保存切片原文、顺序、页码、类型和来源元数据，支持审计及重建向量库。
+- Embedding 或向量数据库失败时记录明确错误，不把未完成资料标记为完整入库。
+
+### 7. 研究项目管理模块
+
+- 创建和查看研究项目。
+- 创建项目时或创建后批量绑定已有文献。
+- 查看项目已经收录的全部文献。
+- 单篇或批量解除项目与文献的绑定。
+- 从项目移除文献只删除关联关系，不默认删除个人文献库中的原始资料。
+- 查看项目历史提问、AI 回答和引用来源。
+- 单条或批量删除无意义问答，避免干扰后续项目总结。
+
+### 8. 知识库问答模块
+
+- 用户从下拉框选择自己的研究项目后直接提问。
+- 系统只在该项目有权访问的文献范围内召回相关片段。
+- 根据向量召回结果回查 PostgreSQL，补充文献标题、正文、页码和切片 ID。
+- 将带来源标记的上下文交给大模型生成可读文本回答。
+- 回答包含引用信息，而不是只向用户展示 JSON。
+- 项目问答完成后保存问题、回答、引用和总结上下文状态。
+
+### 9. 阶段性总结模块
+
+- 阶段总结位于研究问答模块下，用户需要输入本阶段希望总结的问题。
+- 系统结合项目文献、有效历史问答和当前问题生成阶段性总结。
+- 大模型判断普通问答是否值得进入总结上下文，并保存判断结果和原因。
+- 用户可以人工删除无意义问答，对项目知识轨迹进行二次治理。
+- 当前实现面向“围绕课题持续追问并阶段性梳理”，而不是无条件拼接所有历史内容。
+
+### 10. 文献管理模块
+
+- 检索个人文献库。
+- 查看文献详情、来源、可见性、解析状态和摘要。
+- 将已有文献批量绑定到项目。
+- 支持删除个人文献库中的资料。
+- 删除时同步处理项目关联、全文切片和向量数据，避免残留孤立记录。
+
+### 11. Streamlit 前端模块
+
+当前前端用于本地测试、面试演示和基础用户操作，包含：
+
+- 注册、登录和账号设置。
+- 研究项目管理。
+- 在线文献检索、候选筛选和导入。
+- 私有资料批量上传。
+- 个人文献库查询、项目绑定和删除。
+- 项目知识库问答。
+- 阶段性总结。
+- 项目文献和历史问答管理。
+
+登录成功后不再显示左侧登录表单，减少重复操作。
+
+### 12. MCP 服务模块
+
+项目保留 FastAPI 和 Streamlit，同时将核心服务封装为 MCP Server。当前提供的 MCP 工具包括：
+
+- `list_projects`
+- `create_project`
+- `list_project_papers`
+- `list_project_qas`
+- `bind_papers_to_project`
+- `remove_project_papers`
+- `delete_project_qas`
+- `search_literature`
+- `import_literature_candidates`
+- `search_my_library`
+- `ask_project_knowledge_base`
+- `summarize_project_stage`
+- `create_manual_material`
+- `upload_user_material`
+- `delete_paper`
+
+需要大模型的 MCP 工具强制要求调用方传入 `llm_config`。文本模型、视觉模型和 API Key 由外部用户提供，避免外部调用消耗服务端默认模型额度。
+
+MCP 默认使用 stdio，仅供本机客户端拉起；也支持 SSE 和 Streamable HTTP。网络模式在加入 token 鉴权、用户身份映射、限流和审计之前，不建议直接暴露到公网。
+
+## 关键工作流程
+
+### 流程一：在线检索与选择性导入
+
+```text
+用户输入检索词
+    → 可选 LLM 中英文查询改写
+    → PubMed 优先检索候选文献
+    → 返回候选列表，不写数据库
+    → 用户勾选目标文献和目标项目
+    → DOI / PMID / 来源 ID 去重
+    → 写入 PostgreSQL 元数据
+    → 摘要 Embedding 写入 Milvus
+    → 可选 PMC 结构化全文或 PDF 全文处理
+    → 全文切片写入 PostgreSQL 与 Milvus
+    → 绑定到研究项目
 ```
-外部数据源 API 调用
-    → 清洗元数据
-    → PostgreSQL 写入/更新
-    → 生成 embedding
-    → 向量数据库写入
-    → 如有 PDF 全文 → 下载解析 → 分块 → 向量化 → 写入向量库
+
+### 流程二：用户私有资料导入
+
+```text
+用户批量选择 PDF / DOCX / Markdown
+    → 文件类型、大小和 SHA-256 检查
+    → 保存本地文件
+    → 原生文本 / 多模态 / OCR 解析
+    → 用户 title / abstract 覆盖
+    → 内容有效性检查
+    → 摘要与全文切片 Embedding
+    → 写入 PostgreSQL 与 Milvus
+    → 可选绑定项目，否则进入个人资料库
 ```
 
-流程三：RAG 问答
+### 流程三：项目知识库问答
 
-```
-用户提问
-    → 判断问题范围（单篇 or 项目集合）
-    → 向量检索相关片段（Top-K = 8~12）
-    → 拼接 Prompt 模板（含片段引用标记）
-    → LLM 生成回答
-    → 缓存问答对（Redis）
-    → 返回回答（含引用文献列表）
-```
-
-流程四：批量总结
-
-```
-用户发起批量总结请求
-    → API 立即返回 task_id
-    → Celery 异步任务：逐篇提取要点 → 聚合生成综述
-    → LLM 生成对比性总结
-    → 结果写入 PostgreSQL + Redis 缓存
-    → 用户轮询或 WebSocket 推送完成通知
+```text
+用户选择项目并提问
+    → 校验项目归属和文献范围
+    → 问题 Embedding
+    → Milvus 召回相关全文片段
+    → PostgreSQL 回填正文、标题、页码和权限
+    → 过滤无效及越权片段
+    → 构建带引用上下文
+    → LLM 生成文本回答
+    → 保存有效问答和引用记录
 ```
 
-数据库 Schema 概要
+### 流程四：项目阶段性总结
 
-PostgreSQL 表
+```text
+用户选择项目并输入阶段问题
+    → 读取项目文献证据
+    → 读取允许进入总结上下文的历史问答
+    → 组织项目阶段上下文
+    → LLM 生成阶段性总结
+    → 返回研究进展、方法、证据和后续思路
+```
+
+### 流程五：外部 Agent 调用
+
+```text
+外部 MCP Client
+    → 连接 stdio / SSE / Streamable HTTP
+    → 调用 LitSage MCP 工具
+    → 传入用户 ID、业务参数和调用方 llm_config
+    → 复用现有 Service、PostgreSQL 与 Milvus
+    → 返回结构化工具结果
+```
+
+## 数据库 Schema 概要
+
+### PostgreSQL 核心表
 
 ```sql
--- 文献表
 papers (
     id UUID PRIMARY KEY,
     title TEXT NOT NULL,
     authors JSONB,
     abstract TEXT,
     doi VARCHAR UNIQUE,
-    source VARCHAR,           -- arxiv / semantic_scholar / pubmed
-    source_id VARCHAR,        -- 外部平台 ID
+    source VARCHAR,
+    source_id VARCHAR,
     published_date DATE,
     pdf_url TEXT,
-    citation_count INT DEFAULT 0,
-    metadata JSONB,           -- 扩展字段
-    created_at TIMESTAMP,
-    updated_at TIMESTAMP
+    metadata JSONB,
+    source_type VARCHAR,
+    publication_status VARCHAR,
+    visibility VARCHAR,
+    owner_user_id UUID,
+    original_filename TEXT,
+    file_path TEXT,
+    file_sha256 VARCHAR,
+    ingestion_status VARCHAR,
+    analysis_status VARCHAR,
+    text_extraction_method VARCHAR
 )
 
--- 用户表
 users (
     id UUID PRIMARY KEY,
     username VARCHAR UNIQUE,
@@ -137,7 +306,6 @@ users (
     created_at TIMESTAMP
 )
 
--- 研究项目表
 projects (
     id UUID PRIMARY KEY,
     user_id UUID REFERENCES users(id),
@@ -146,7 +314,6 @@ projects (
     created_at TIMESTAMP
 )
 
--- 项目-文献关联表
 project_papers (
     project_id UUID REFERENCES projects(id),
     paper_id UUID REFERENCES papers(id),
@@ -154,109 +321,405 @@ project_papers (
     PRIMARY KEY (project_id, paper_id)
 )
 
--- 总结任务表
+project_qas (
+    id UUID PRIMARY KEY,
+    project_id UUID REFERENCES projects(id),
+    user_id UUID REFERENCES users(id),
+    question TEXT,
+    answer TEXT,
+    citations JSONB,
+    include_in_summary_context BOOLEAN,
+    summary_context_reason TEXT,
+    created_at TIMESTAMP
+)
+
+paper_files (
+    id UUID PRIMARY KEY,
+    paper_id UUID REFERENCES papers(id),
+    user_id UUID REFERENCES users(id),
+    original_filename TEXT,
+    stored_path TEXT,
+    mime_type VARCHAR,
+    file_size_bytes BIGINT,
+    sha256 VARCHAR,
+    upload_status VARCHAR
+)
+
+paper_chunks (
+    id UUID PRIMARY KEY,
+    paper_id UUID REFERENCES papers(id),
+    chunk_index INTEGER,
+    text TEXT,
+    page_start INTEGER,
+    page_end INTEGER,
+    chunk_type VARCHAR,
+    metadata JSONB
+)
+
 summary_tasks (
     id UUID PRIMARY KEY,
     user_id UUID REFERENCES users(id),
-    project_id UUID REFERENCES projects(id),
+    project_id UUID,
     paper_ids UUID[],
-    status VARCHAR,           -- pending / processing / completed / failed
+    status VARCHAR,
     result_text TEXT,
     created_at TIMESTAMP,
     completed_at TIMESTAMP
 )
 ```
 
-Redis 数据结构
+### Milvus Collections
 
-Key 模式 类型 用途
-search:{query_hash} String (JSON) 缓存搜索结果
-session:{user_id}:{session_id} List 对话历史（RAG 多轮）
-rate_limit:{user_id} String API 限流计数
-task_status:{task_id} String Celery 任务状态缓存
-paper_summary:{paper_id} String 单篇总结缓存
+| Collection | 默认维度 | 用途 |
+| --- | ---: | --- |
+| `paper_abstracts` | 1024 | 标题与摘要语义检索 |
+| `paper_chunks` | 1024 | 全文切片检索与项目 RAG |
 
-向量数据库集合
+## API 接口概要
 
-Collection 名称 维度 用途
-paper_abstracts 1024 文献标题+摘要向量
-paper_chunks 1024 全文分块向量（用于 RAG）
+### 用户认证
 
-API 接口概要
-
-```
-POST   /api/auth/register          用户注册
-POST   /api/auth/login             用户登录
-
-GET    /api/search                 语义搜索文献
-POST   /api/search/rewrite         查询改写（调试用）
-
-POST   /api/papers/import          手动导入文献（从外部源）
-GET    /api/papers/{id}            获取文献详情
-GET    /api/papers/{id}/summary    获取单篇总结
-
-POST   /api/projects               创建研究项目
-GET    /api/projects               获取用户项目列表
-POST   /api/projects/{id}/papers   添加文献到项目
-POST   /api/projects/{id}/summary  批量总结项目文献
-
-POST   /api/qa                     单篇/项目 RAG 问答
-GET    /api/tasks/{task_id}        查询异步任务状态
-WS     /ws/tasks/{task_id}         WebSocket 任务完成推送
+```text
+POST   /api/auth/register                  注册用户
+POST   /api/auth/login                     用户登录
+GET    /api/auth/me                        获取当前用户
+POST   /api/auth/email/verification-code   发送邮箱验证码
+PATCH  /api/auth/me/email                  修改邮箱
+PATCH  /api/auth/me/password               修改密码
 ```
 
-非功能性需求
+### 文献检索与管理
 
-维度 要求
-性能 搜索接口 P95 延迟 < 2s（含缓存命中）；未命中 < 5s
-并发 支持 50+ 并发用户同时搜索
-可扩展 向量数据库与 LLM 服务均支持水平扩展
-容错 外部数据源调用失败时降级返回已有数据
-缓存策略 搜索结果 TTL 10min；单篇总结 TTL 24h
-限流 每用户 20 req/min（Redis 计数器实现）
-
-项目结构参考
-
-```
-litsage/
-├── app/
-│   ├── main.py                # FastAPI 入口
-│   ├── config.py              # 配置管理（Pydantic Settings）
-│   ├── api/
-│   │   ├── routes/
-│   │   │   ├── auth.py
-│   │   │   ├── search.py
-│   │   │   ├── papers.py
-│   │   │   ├── projects.py
-│   │   │   ├── qa.py
-│   │   │   └── tasks.py
-│   │   └── dependencies.py    # 依赖注入
-│   ├── core/
-│   │   ├── security.py        # JWT
-│   │   ├── redis_client.py
-│   │   └── celery_app.py
-│   ├── models/
-│   │   ├── db.py              # SQLAlchemy Base
-│   │   └── schemas.py         # Pydantic 模型
-│   ├── services/
-│   │   ├── search_service.py
-│   │   ├── rag_service.py
-│   │   ├── summary_service.py
-│   │   ├── embedding_service.py
-│   │   ├── vector_store.py
-│   │   └── paper_importer.py
-│   ├── llm/
-│   │   ├── llm_client.py      # LLM 调用封装
-│   │   ├── prompts.py         # Prompt 模板管理
-│   │   └── reranker.py        # 重排序模型
-│   └── tasks/
-│       ├── celery_tasks.py    # 异步任务定义
-│       └── workers.py
-├── migrations/                 # Alembic 数据库迁移
-├── tests/
-├── docker-compose.yml          # PostgreSQL + Redis + Milvus
-├── .env.example
-└── requirements.txt
+```text
+GET    /api/search                         检索个人库及外部文献
+POST   /api/search/rewrite                 查询改写
+POST   /api/papers/import                  直接导入外部文献
+POST   /api/papers/import/preview          获取候选文献
+POST   /api/papers/import/selected         导入选中的候选文献
+POST   /api/papers/upload                  上传单份用户资料
+POST   /api/papers/upload/batch            批量上传用户资料
+POST   /api/papers/manual                  手动创建资料
+GET    /api/papers                         查询个人文献库
+GET    /api/papers/{paper_id}              查看文献详情
+GET    /api/papers/{paper_id}/summary      获取文献总结
+DELETE /api/papers/{paper_id}              删除文献
 ```
 
+### 研究项目
 
+```text
+POST   /api/projects                                   创建项目
+GET    /api/projects                                   查看项目列表
+GET    /api/projects/{project_id}/papers               查看项目文献
+POST   /api/projects/{project_id}/papers               绑定单篇文献
+POST   /api/projects/{project_id}/papers/batch         批量绑定文献
+DELETE /api/projects/{project_id}/papers/{paper_id}    移除单篇文献
+POST   /api/projects/{project_id}/papers/delete        批量移除文献
+GET    /api/projects/{project_id}/qas                  查看历史问答
+DELETE /api/projects/{project_id}/qas/{qa_id}          删除单条问答
+POST   /api/projects/{project_id}/qas/delete           批量删除问答
+POST   /api/projects/{project_id}/summary              生成阶段性总结
+```
+
+### 问答与任务
+
+```text
+POST   /api/qa                             项目知识库问答
+GET    /api/tasks/{task_id}                查询任务状态
+GET    /health                             后端健康检查
+```
+
+## 项目结构
+
+```text
+文献搜索总结系统/
+├── Readme.md                         # 初始项目设计模板
+├── readme2.0.md                      # 当前版本开发文档
+└── litsage/
+    ├── app/
+    │   ├── main.py                   # FastAPI 入口
+    │   ├── config.py                 # Pydantic Settings 配置
+    │   ├── api/
+    │   │   ├── dependencies.py       # 数据库和认证依赖
+    │   │   └── routes/
+    │   │       ├── auth.py           # 注册、登录与账号设置
+    │   │       ├── search.py         # 文献搜索与查询改写
+    │   │       ├── papers.py         # 导入、上传、查询与删除
+    │   │       ├── projects.py       # 项目、绑定、问答与总结
+    │   │       ├── qa.py             # RAG 问答入口
+    │   │       └── tasks.py          # 任务状态
+    │   ├── core/
+    │   │   ├── security.py           # JWT 与密码安全
+    │   │   ├── redis_client.py       # Redis 客户端
+    │   │   └── celery_app.py         # Celery 基础配置
+    │   ├── llm/
+    │   │   ├── llm_client.py         # 文本与视觉模型统一客户端
+    │   │   ├── prompts.py            # Prompt 模板
+    │   │   └── reranker.py           # 重排序接口
+    │   ├── mcp/
+    │   │   ├── runtime.py            # 调用方 LLM 运行时配置
+    │   │   └── server.py             # MCP Server 与工具
+    │   ├── models/
+    │   │   ├── db.py                 # SQLAlchemy 数据模型
+    │   │   └── schemas.py            # Pydantic 请求响应模型
+    │   ├── services/
+    │   │   ├── paper_importer.py     # 外部文献检索与导入
+    │   │   ├── pdf_resolver.py       # 全文发现、下载与 PMC 解析
+    │   │   ├── user_material_importer.py # 私有资料解析与入库
+    │   │   ├── embedding_service.py  # Embedding 客户端
+    │   │   ├── vector_store.py       # Milvus 操作
+    │   │   ├── rag_service.py        # 项目知识库问答
+    │   │   ├── summary_service.py    # 文献与项目总结
+    │   │   ├── paper_catalog_service.py # 个人文献库查询
+    │   │   └── paper_cleanup_service.py # 文献清理
+    │   └── tasks/
+    │       └── celery_tasks.py       # 异步任务定义
+    ├── frontend/
+    │   └── streamlit_app.py          # Streamlit 前端
+    ├── migrations/                   # Alembic 迁移
+    ├── scripts/                      # 初始化、诊断和 MCP 脚本
+    ├── tests/                        # 自动化测试
+    ├── docs/                         # 设计文档与开发日志
+    ├── docker-compose.yml            # PostgreSQL、Redis、Milvus
+    ├── alembic.ini
+    └── requirements.txt
+```
+
+## 安装与启动
+
+以下命令均在 `litsage` 目录下执行。
+
+### 1. 创建环境并安装依赖
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+当前 MCP 实现使用 1.x FastMCP API，依赖已经固定为：
+
+```text
+mcp[cli]>=1.27,<2
+```
+
+### 2. 启动基础服务
+
+```powershell
+docker compose up -d
+```
+
+该命令启动 PostgreSQL、Redis、etcd、MinIO 和 Milvus。大模型及本地 Embedding 服务需要根据实际配置单独启动或接入。
+
+### 3. 配置环境变量
+
+在 `litsage/.env` 中配置运行参数。以下为示意值，请勿把真实 API Key 提交到 Git：
+
+```dotenv
+APP_NAME=LitSage
+ENVIRONMENT=dev
+AUTO_CREATE_TABLES=true
+
+DATABASE_URL=postgresql+psycopg://litsage:your_password@localhost:5432/litsage
+REDIS_URL=redis://localhost:6379/0
+MILVUS_URI=http://localhost:19530
+
+EMBEDDING_PROVIDER=ollama
+EMBEDDING_MODEL=your_embedding_model
+EMBEDDING_DIM=1024
+LOCAL_OLLAMA_BASE_URL=http://localhost:11434
+
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your_api_key
+OPENAI_BASE_URL=https://your-provider.example/v1
+OPENAI_API_MODE=responses
+OPENAI_MODEL=your_text_model
+DEEPSEEK_VISION_MODEL=your_vision_model
+
+PDF_MULTIMODAL_ENABLED=true
+PDF_OCR_ENABLED=false
+PDF_OCR_LANGUAGES=eng+chi_sim
+
+PUBMED_EMAIL=your_email@example.com
+PUBMED_API_KEY=
+SEMANTIC_SCHOLAR_API_KEY=
+```
+
+注意：配置项使用下划线，例如 `AUTO_CREATE_TABLES`，不要写成带反斜杠的 `AUTO\_CREATE\_TABLES`。
+
+### 4. 执行数据库迁移
+
+推荐使用 Alembic，而不是长期依赖自动建表：
+
+```powershell
+alembic upgrade head
+```
+
+开发环境也可以临时使用：
+
+```dotenv
+ENVIRONMENT=dev
+AUTO_CREATE_TABLES=true
+```
+
+自动建表只能创建缺失表，不能可靠替代已有表的字段迁移。
+
+### 5. 启动 FastAPI 后端
+
+```powershell
+uvicorn app.main:app --reload
+```
+
+访问地址：
+
+```text
+API 文档：http://127.0.0.1:8000/docs
+健康检查：http://127.0.0.1:8000/health
+```
+
+### 6. 启动 Streamlit 前端
+
+打开另一个终端，在 `litsage` 目录执行：
+
+```powershell
+streamlit run frontend/streamlit_app.py
+```
+
+默认访问地址：
+
+```text
+http://127.0.0.1:8501
+```
+
+### 7. 启动 MCP Server
+
+本机 stdio 模式：
+
+```powershell
+python -m app.mcp.server
+```
+
+SSE 测试模式：
+
+```powershell
+python scripts/run_mcp_sse_server.py --host 127.0.0.1 --port 9010
+```
+
+测试 MCP 连接：
+
+```powershell
+python scripts/test_mcp_remote_client.py --url http://127.0.0.1:9010/sse
+```
+
+## 调试与测试
+
+### 自动化测试
+
+```powershell
+pytest
+```
+
+### 数据库结构检查
+
+```powershell
+python scripts/check_db_schema.py
+```
+
+### 文献导入依赖检查
+
+```powershell
+python scripts/check_importer_stack.py
+```
+
+### PDF 全链路诊断
+
+```powershell
+python scripts/debug_pdf_ingestion_pipeline.py --pdf-url "PDF_URL"
+```
+
+也可以按文献 ID、本地文件或 PMCID 调试：
+
+```powershell
+python scripts/debug_pdf_ingestion_pipeline.py --paper-id "PAPER_UUID"
+python scripts/debug_pdf_ingestion_pipeline.py --file "D:\papers\sample.pdf"
+python scripts/debug_pdf_ingestion_pipeline.py --pmc-id "PMC1234567"
+```
+
+该脚本用于分别检查全文发现、下载响应、PDF 真实性、原生文本、页面渲染、多模态解析、切片和 Embedding，不写入 PostgreSQL 或 Milvus。
+
+## 非功能性设计
+
+| 维度 | 当前策略 |
+| --- | --- |
+| 数据隔离 | 项目和私有资料按用户 ID 限制访问 |
+| 可追溯性 | PostgreSQL 保存正文切片、页码、文献来源和问答引用 |
+| 去重 | 外部文献使用 DOI/来源 ID，用户文件使用 SHA-256 |
+| 容错 | 全文获取采用结构化全文、原生 PDF、视觉模型、OCR 分层降级 |
+| 配置安全 | API Key 使用环境变量；MCP LLM 工具要求调用方提供配置 |
+| 可迁移性 | 使用 Alembic 管理数据库结构 |
+| 可测试性 | 提供自动化测试及 PDF 入库分阶段诊断脚本 |
+| 可扩展性 | API、Service、存储和 MCP 适配层分离 |
+
+当前版本尚未通过正式并发压测，因此不承诺固定的 P95 延迟和并发用户数量。
+
+## 当前限制
+
+- 复杂出版商站点可能存在登录、验证码、JavaScript challenge 或版权限制，系统无法保证自动获得所有论文全文。
+- 多模态模型的图片输入格式、模型能力和服务商实现存在差异，解析结果仍需质量检查。
+- 当前 RAG 以向量召回为主，尚未形成完整的混合检索、Cross-Encoder 重排序和答案证据自检链路。
+- 文献导入和全文向量化仍以同步流程为主，长任务需要继续迁移到 Celery Worker。
+- Streamlit 适合开发和演示，尚不是正式生产前端。
+- MCP 网络模式尚缺少完整的 token 到用户身份映射、细粒度授权、限流和审计。
+- 用户上传文件当前保存在本地，生产环境需要迁移到对象存储并增加病毒扫描和生命周期管理。
+
+## 后续开发计划
+
+### 1. Agent Run 与任务状态
+
+- 新增 `agent_runs`、`agent_steps` 和工具调用日志。
+- 将研究目标拆解为检索、筛选、全文获取、分析和总结步骤。
+- 支持步骤重试、失败恢复、暂停和继续。
+
+### 2. LLM 调用治理
+
+- 统一 retry、指数退避、超时和 fallback。
+- 记录模型、耗时、Token 和费用。
+- 建立文本模型与视觉模型路由。
+- 增加结构化输出校验和错误分类。
+
+### 3. RAG 质量提升
+
+- 增加关键词与向量混合检索。
+- 接入 Reranker。
+- 建立检索召回、引用覆盖和事实一致性评测集。
+- 增加答案生成后的证据校验。
+
+### 4. 文献结构化理解
+
+- 抽取研究背景、研究设计、样本量、方法、结果、结论和局限。
+- 提取图表题注和表格结构。
+- 识别疾病、药物、基因、数据集和评价指标。
+- 为入库文献生成覆盖率与解析质量评分。
+
+### 5. 工程与安全
+
+- 文献导入迁移到 Celery 异步任务。
+- 文件迁移到 MinIO 或其他对象存储。
+- 增加 MCP token 鉴权、权限范围、限流和审计日志。
+- 正式部署时使用反向代理、HTTPS 和受控 CORS。
+- 将 Streamlit 逐步替换为 React、Vue 或 Next.js 正式前端。
+
+## 项目核心优势
+
+1. 以研究项目为中心组织文献、私有资料、问答和阶段总结，而不是一次性调用大模型。
+2. 同时支持公开文献和未发表资料，能够覆盖真实科研工作中的内部知识资产。
+3. 针对医学场景重点优化 PubMed、PMCID 和 PMC 官方结构化全文链路。
+4. 通过 PostgreSQL 与 Milvus 分工保存事实数据和向量数据，使回答证据可追溯。
+5. 同时提供 Streamlit、REST API 和 MCP 三种使用方式，可供人工操作或外部 Agent 复用。
+6. 具备清晰的 Agent 化升级路径，能够继续扩展任务规划、工具编排和研究过程管理。
+
+## 当前阶段结论
+
+LitSage 2.0 已经完成科研资料从“获取、解析、入库、组织、检索、问答到阶段总结”的基础闭环，并将核心能力封装为可复用的 MCP 工具。
+
+项目的真正价值不只是替用户调用大模型总结论文，而是为科研项目建立长期、私有、可管理并且能够追溯证据的知识底座。下一阶段的重点是补齐 Agent 状态管理、模型调用治理、RAG 质量评测和对外服务安全，使系统从可用的科研知识库逐步演进为能够持续跟进课题的科研 Agent。
