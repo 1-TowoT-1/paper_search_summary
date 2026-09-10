@@ -1,4 +1,4 @@
-# LitSage 2.0：科研文献智能检索与项目知识库系统
+# LitSage 1.0：科研文献智能检索与项目知识库系统
 
 ## 项目概述
 
@@ -10,7 +10,7 @@
 
 当前版本定位：
 
-> LitSage 2.0 是一个具备 Agent 化扩展基础的科研文献知识库与 RAG 分析系统。
+> LitSage 1.0 是一个具备 Agent 化扩展基础的科研文献知识库与 RAG 分析系统。
 
 系统已经实现文献检索、全文获取、资料解析、向量化、项目管理、知识库问答、阶段总结和 MCP 工具接口。当前尚未实现成熟 Agent 所需的自主任务规划、持久化运行状态、多工具自动编排和自我校验闭环，因此更准确的描述是 Agent-ready，而不是完全自主的科研 Agent。
 
@@ -433,8 +433,7 @@ GET    /health                             后端健康检查
 
 ```text
 文献搜索总结系统/
-├── Readme.md                         # 初始项目设计模板
-├── readme2.0.md                      # 当前版本开发文档
+├── Readme.md                         # 项目设计模板
 └── litsage/
     ├── app/
     │   ├── main.py                   # FastAPI 入口
@@ -497,12 +496,6 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-当前 MCP 实现使用 1.x FastMCP API，依赖已经固定为：
-
-```text
-mcp[cli]>=1.27,<2
-```
-
 ### 2. 启动基础服务
 
 ```powershell
@@ -513,7 +506,7 @@ docker compose up -d
 
 ### 3. 配置环境变量
 
-在 `litsage/.env` 中配置运行参数。以下为示意值，请勿把真实 API Key 提交到 Git：
+在 `litsage/.env` 中配置运行参数。
 
 ```dotenv
 APP_NAME=LitSage
@@ -545,7 +538,6 @@ PUBMED_API_KEY=
 SEMANTIC_SCHOLAR_API_KEY=
 ```
 
-注意：配置项使用下划线，例如 `AUTO_CREATE_TABLES`，不要写成带反斜杠的 `AUTO\_CREATE\_TABLES`。
 
 ### 4. 执行数据库迁移
 
@@ -720,6 +712,6 @@ python scripts/debug_pdf_ingestion_pipeline.py --pmc-id "PMC1234567"
 
 ## 当前阶段结论
 
-LitSage 2.0 已经完成科研资料从“获取、解析、入库、组织、检索、问答到阶段总结”的基础闭环，并将核心能力封装为可复用的 MCP 工具。
+LitSage 1.0 已经完成科研资料从“获取、解析、入库、组织、检索、问答到阶段总结”的基础闭环，并将核心能力封装为可复用的 MCP 工具。
 
 项目的真正价值不只是替用户调用大模型总结论文，而是为科研项目建立长期、私有、可管理并且能够追溯证据的知识底座。下一阶段的重点是补齐 Agent 状态管理、模型调用治理、RAG 质量评测和对外服务安全，使系统从可用的科研知识库逐步演进为能够持续跟进课题的科研 Agent。
