@@ -8,12 +8,27 @@ from fastapi.testclient import TestClient
 from app.main import create_app
 from app.api.dependencies import get_current_user_id, get_db
 from app.models.db import Paper, Project, ProjectQA
-from app.models.schemas import Citation, ImportCandidatePaper, UploadMaterialResponse
+from app.models.schemas import (
+    Citation,
+    ImportCandidatePaper,
+    ImportPapersRequest,
+    LiteratureSource,
+    QARequest,
+    QAScope,
+    UploadMaterialResponse,
+)
 from app.services.email_verification_service import EmailVerificationService
 from app.llm.llm_client import LLMClient, LLMClientError
 from app.services.paper_importer import ImportedPaper, ImportStats, PaperImporter
 from app.services.paper_catalog_service import PaperCatalogService
 from app.services.pdf_resolver import PDFResolveResult, PDFResolver, StructuredFullTextResult
+from app.services.project_agent_service import (
+    DIRECT_ANSWER,
+    GET_PROJECT_STATS,
+    LIST_PROJECT_PAPERS,
+    SEARCH_PROJECT_EVIDENCE,
+    ProjectAgentService,
+)
 from app.services.rag_service import RAGService
 from app.services.search_service import SearchService
 from app.services.summary_service import SummaryService
@@ -171,6 +186,82 @@ def test_rag_skips_unsupported_image_placeholders() -> None:
     assert service._is_unusable_evidence_text("无法读取图片内容")
     assert service._is_unusable_evidence_text("抱歉，我无法看到上传的图片内容。图片显示为“[无法识别]”。")
     assert not service._is_unusable_evidence_text("This paper describes a cohort study and survival analysis.")
+
+
+def test_project_agent_routes_exact_project_questions_without_vector_search() -> None:
+    service = ProjectAgentService.__new__(ProjectAgentService)
+
+    assert service._high_confidence_action("这个项目目前有多少篇文献？") == GET_PROJECT_STATS
+    assert service._high_confidence_action("请列出项目中有哪些文献") == LIST_PROJECT_PAPERS
+    assert service._high_confidence_action("你好") == DIRECT_ANSWER
+
+
+def test_project_agent_prevents_direct_answer_for_project_facts() -> None:
+    service = ProjectAgentService.__new__(ProjectAgentService)
+
+    action = service._enforce_policy("这个项目中的论文采用了哪些研究方法？", DIRECT_ANSWER)
+
+    assert action == SEARCH_PROJECT_EVIDENCE
+
+
+@pytest.mark.asyncio
+async def test_llm_project_question_planner_parses_allowed_action() -> None:
+    client = LLMClient()
+
+    async def fake_generate(**_kwargs):
+        return '{"action":"get_project_stats","reason":"需要查询项目文献数量"}'
+
+    client._generate = fake_generate
+
+    decision = await client.plan_project_question("这个项目有多少篇文献？")
+
+    assert decision == {"action": "get_project_stats", "reason": "需要查询项目文献数量"}
+
+
+@pytest.mark.asyncio
+async def test_project_agent_stats_question_does_not_call_rag() -> None:
+    service = ProjectAgentService.__new__(ProjectAgentService)
+    project = Project(id=uuid4(), user_id=uuid4(), name="肝癌研究", description=None)
+
+    class FakeLLM:
+        async def answer_from_project_tool(self, question, tool_name, tool_result):
+            assert tool_name == GET_PROJECT_STATS
+            assert tool_result["paper_count"] == 3
+            return "该项目目前收录 3 篇文献。"
+
+    class FakeRAG:
+        def __init__(self):
+            self.recorded = False
+
+        async def answer(self, **_kwargs):
+            raise AssertionError("A project statistics question must not enter vector RAG")
+
+        async def _record_project_qa(self, **_kwargs):
+            self.recorded = True
+
+    service.llm = FakeLLM()
+    service.rag = FakeRAG()
+    service._get_owned_project = lambda **_kwargs: project
+    service._get_project_stats = lambda **_kwargs: {
+        "project_id": str(project.id),
+        "project_name": project.name,
+        "paper_count": 3,
+        "qa_count": 2,
+    }
+
+    response = await service.answer(
+        db=object(),
+        payload=QARequest(
+            question="这个项目目前有多少篇文献？",
+            scope=QAScope.project,
+            project_id=project.id,
+        ),
+        user_id=str(project.user_id),
+    )
+
+    assert response.answer == "该项目目前收录 3 篇文献。"
+    assert response.citations == []
+    assert service.rag.recorded
 
 
 @pytest.mark.asyncio
@@ -371,6 +462,96 @@ def test_external_queries_prefer_english_rewrites_for_chinese_query() -> None:
         "liver cancer diagnosis deep learning",
         "hepatocellular carcinoma detection using neural networks",
     ]
+
+
+@pytest.mark.asyncio
+async def test_import_preview_translates_chinese_query_before_pubmed_search() -> None:
+    importer = PaperImporter()
+    captured_queries: list[str] = []
+
+    async def fake_rewrite_query(query: str) -> list[str]:
+        assert query == "肝癌 免疫治疗 研究进展"
+        return [query, "liver cancer immunotherapy research progress"]
+
+    async def fake_fetch_pubmed(query, limit, stats, year_from=None, year_to=None):
+        captured_queries.append(query)
+        return []
+
+    importer.llm.rewrite_query = fake_rewrite_query
+    importer.fetch_pubmed = fake_fetch_pubmed
+    stats = ImportStats()
+
+    await importer.fetch_from_sources(
+        payload=ImportPapersRequest(
+            query="肝癌 免疫治疗 研究进展",
+            sources=[LiteratureSource.pubmed],
+            limit=10,
+        ),
+        stats=stats,
+    )
+
+    assert captured_queries == ["liver cancer immunotherapy research progress"]
+    assert stats.values["query_rewrites"] == [
+        "肝癌 免疫治疗 研究进展 -> liver cancer immunotherapy research progress"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_import_preview_keeps_english_pubmed_query_without_rewrite() -> None:
+    importer = PaperImporter()
+    captured_queries: list[str] = []
+
+    async def fail_if_called(_query: str) -> list[str]:
+        raise AssertionError("English PubMed queries must not call the LLM rewriter")
+
+    async def fake_fetch_pubmed(query, limit, stats, year_from=None, year_to=None):
+        captured_queries.append(query)
+        return []
+
+    importer.llm.rewrite_query = fail_if_called
+    importer.fetch_pubmed = fake_fetch_pubmed
+    stats = ImportStats()
+
+    await importer.fetch_from_sources(
+        payload=ImportPapersRequest(
+            query="liver cancer immunotherapy",
+            sources=[LiteratureSource.pubmed],
+            limit=10,
+        ),
+        stats=stats,
+    )
+
+    assert captured_queries == ["liver cancer immunotherapy"]
+    assert stats.values["query_rewrites"] == []
+
+
+@pytest.mark.asyncio
+async def test_import_preview_falls_back_when_chinese_query_has_no_english_rewrite() -> None:
+    importer = PaperImporter()
+    captured_queries: list[str] = []
+
+    async def fake_rewrite_query(query: str) -> list[str]:
+        return [query]
+
+    async def fake_fetch_pubmed(query, limit, stats, year_from=None, year_to=None):
+        captured_queries.append(query)
+        return []
+
+    importer.llm.rewrite_query = fake_rewrite_query
+    importer.fetch_pubmed = fake_fetch_pubmed
+    stats = ImportStats()
+
+    await importer.fetch_from_sources(
+        payload=ImportPapersRequest(
+            query="乳腺癌诊断",
+            sources=[LiteratureSource.pubmed],
+            limit=10,
+        ),
+        stats=stats,
+    )
+
+    assert captured_queries == ["乳腺癌诊断"]
+    assert stats.values["warnings"] == ["PubMed 中文查询未能转换为英文，已使用原查询继续检索。"]
 
 
 def test_paper_catalog_filters_use_expanded_query_terms() -> None:

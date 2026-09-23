@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     local_ollama_model: str = "qwen2.5:7b"
     llm_temperature: float = 0.2
     llm_timeout_seconds: float = 60.0
-    llm_max_output_tokens: int = 1600
+    llm_max_output_tokens: int = 10000
 
     search_cache_ttl_seconds: int = 600
     search_local_min_results: int = 5

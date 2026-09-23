@@ -115,7 +115,7 @@ OpenAI 兼容模型：
   "vision_model": "gpt-4.1-mini",
   "temperature": 0.2,
   "timeout_seconds": 60,
-  "max_output_tokens": 1600
+  "max_output_tokens": 10000
 }
 ```
 
@@ -131,7 +131,7 @@ DeepSeek 文本模型加视觉模型：
   "vision_model": "deepseek-v4-flash-vision-exp",
   "temperature": 0.2,
   "timeout_seconds": 60,
-  "max_output_tokens": 1600
+  "max_output_tokens": 10000
 }
 ```
 
@@ -169,5 +169,4 @@ DeepSeek 文本模型加视觉模型：
 第一版 MCP 仍复用当前服务端数据库、Milvus 和 embedding 配置。外部调用方负责提供 LLM 配置；服务端负责保存文献、切片、向量和项目问答历史。
 
 删除类工具已经加入显式确认参数，但 MCP 侧还没有更复杂的租户级 token 鉴权。对外部署前建议再增加 MCP 客户端身份映射、访问令牌和审计日志。
-
 

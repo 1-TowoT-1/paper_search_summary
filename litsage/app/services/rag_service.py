@@ -20,7 +20,13 @@ class RAGService:
     def __init__(self) -> None:
         self.llm = LLMClient()
         self.embeddings = EmbeddingService()
-        self.vector_store = VectorStore()
+        self._vector_store: VectorStore | None = None
+
+    @property
+    def vector_store(self) -> VectorStore:
+        if self._vector_store is None:
+            self._vector_store = VectorStore()
+        return self._vector_store
 
     async def answer(self, db: Session, payload: QARequest, user_id: str) -> QAResponse:
         user_uuid = UUID(user_id)

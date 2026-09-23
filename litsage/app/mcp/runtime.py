@@ -19,7 +19,7 @@ class MCPLLMConfig(BaseModel):
     vision_model: str | None = None
     temperature: float = 0.2
     timeout_seconds: float = 60.0
-    max_output_tokens: int = 1600
+    max_output_tokens: int = 10000
     ollama_base_url: str | None = None
     ollama_model: str | None = None
 

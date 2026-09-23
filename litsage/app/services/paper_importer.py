@@ -90,6 +90,8 @@ class ImportStats:
             "project_already_linked": 0,
             "failed": 0,
             "errors": [],
+            "warnings": [],
+            "query_rewrites": [],
         }
 
     def inc(self, key: str, value: int = 1) -> None:
@@ -105,6 +107,16 @@ class ImportStats:
         errors = self.values.setdefault("errors", [])
         if isinstance(errors, list):
             errors.append(message[:500])
+
+    def append_warning(self, message: str) -> None:
+        warnings = self.values.setdefault("warnings", [])
+        if isinstance(warnings, list):
+            warnings.append(message[:500])
+
+    def append_query_rewrite(self, original: str, rewritten: str) -> None:
+        rewrites = self.values.setdefault("query_rewrites", [])
+        if isinstance(rewrites, list):
+            rewrites.append(f"{original} -> {rewritten}"[:500])
 
     def append_manual_pdf_required(self, message: str) -> None:
         papers = self.values.setdefault("manual_pdf_required_papers", [])
@@ -189,17 +201,50 @@ class PaperImporter:
         year_to: int | None = None,
     ) -> list[ImportedPaper]:
         imported: list[ImportedPaper] = []
+        ranking_query = payload.query
         for source in self._ordered_sources(payload.sources):
             try:
+                source_query = await self._query_for_source(source=source, query=payload.query, stats=stats)
+                if source == LiteratureSource.pubmed and source_query != payload.query:
+                    ranking_query = source_query
                 if source == LiteratureSource.arxiv:
-                    imported.extend(await self.fetch_arxiv(payload.query, payload.limit, stats, year_from, year_to))
+                    imported.extend(await self.fetch_arxiv(source_query, payload.limit, stats, year_from, year_to))
                 elif source == LiteratureSource.semantic_scholar:
                     stats.error("Semantic Scholar importer is reserved but not implemented yet.")
                 elif source == LiteratureSource.pubmed:
-                    imported.extend(await self.fetch_pubmed(payload.query, payload.limit, stats, year_from, year_to))
+                    imported.extend(await self.fetch_pubmed(source_query, payload.limit, stats, year_from, year_to))
             except Exception as exc:
                 stats.error(f"{source.value} fetch failed: {exc}")
-        return self._dedupe_imported(self._rank_external_candidates(query=payload.query, papers=imported))[: payload.limit]
+        return self._dedupe_imported(self._rank_external_candidates(query=ranking_query, papers=imported))[: payload.limit]
+
+    async def _query_for_source(
+        self,
+        source: LiteratureSource,
+        query: str,
+        stats: ImportStats,
+    ) -> str:
+        normalized = " ".join(query.split())
+        if source != LiteratureSource.pubmed or not self._contains_cjk(normalized):
+            return normalized
+
+        variants = await self.llm.rewrite_query(normalized)
+        rewritten = next(
+            (
+                " ".join(item.split())
+                for item in variants
+                if item.strip() and not self._contains_cjk(item) and re.search(r"[A-Za-z]", item)
+            ),
+            None,
+        )
+        if rewritten:
+            stats.append_query_rewrite(normalized, rewritten)
+            return rewritten
+
+        stats.append_warning("PubMed 中文查询未能转换为英文，已使用原查询继续检索。")
+        return normalized
+
+    def _contains_cjk(self, value: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", value))
 
     def _ordered_sources(self, sources: list[LiteratureSource]) -> list[LiteratureSource]:
         priority = {

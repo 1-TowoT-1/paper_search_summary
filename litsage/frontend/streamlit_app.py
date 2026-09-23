@@ -791,6 +791,9 @@ def render_external_import() -> None:
             body = show_response(request("POST", "/api/papers/import/preview", json=payload, timeout=90))
             if isinstance(body, dict):
                 st.session_state["import_candidates"] = body.get("candidates", [])
+                rewrites = (body.get("stats") or {}).get("query_rewrites") or []
+                if rewrites:
+                    st.info(f"PubMed 已使用英文查询：{rewrites[-1]}")
         except requests.RequestException as exc:
             st.error(f"文献搜索失败: {exc}")
 

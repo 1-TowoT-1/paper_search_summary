@@ -29,7 +29,7 @@ from app.models.schemas import (
 from app.services.paper_catalog_service import PaperCatalogFilters, PaperCatalogService
 from app.services.paper_cleanup_service import PaperCleanupService
 from app.services.paper_importer import PaperImporter
-from app.services.rag_service import RAGService
+from app.services.project_agent_service import ProjectAgentService
 from app.services.summary_service import SummaryService
 from app.services.user_material_importer import UserMaterialImporter, parse_authors_json
 
@@ -244,8 +244,7 @@ async def ask_project_knowledge_base(
     """Ask questions against a project's knowledge base."""
     from app.models.schemas import QARequest, QAScope
 
-    service = RAGService()
-    service.llm = _llm(llm_config)
+    service = ProjectAgentService(llm=_llm(llm_config))
     payload = QARequest(scope=QAScope.project, project_id=UUID(project_id), question=question)
     with db_session() as db:
         response = await service.answer(db=db, payload=payload, user_id=str(require_user_uuid(user_id)))
